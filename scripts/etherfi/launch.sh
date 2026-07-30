@@ -54,14 +54,17 @@ fi
 
 # ---------------------------------------------------------------- stage 3: broadcast
 [[ -n "${account:-}" ]] || die "broadcast mode needs account=<foundry keystore name>"
+# the payload script simulates before the keystore unlocks, so forge needs the sender up
+# front (same quirk as etherfi-deploy-engine); defaults to the launch deployer EOA
+SENDER="${sender:-0xf8a86ea1Ac39EC529814c377Bd484387D395421e}"
 
-log "stage 3/3: BROADCAST payload deployment to OP Mainnet with keystore '$account'"
+log "stage 3/3: BROADCAST payload deployment to OP Mainnet with keystore '$account' (sender $SENDER)"
 read -r -p "deploy the payload for real? type 'yes' to continue: " ACK
 [[ "$ACK" == "yes" ]] || die "aborted by user"
 
 log "deploying both payloads (phase 1 config + phase 2 activation)"
 forge script scripts/etherfi/DeployEtherfiCashLaunchPayload.s.sol:DeployEtherfiCashLaunchPayloadScript \
-  --rpc-url "$RPC" --account "$account" --broadcast --verify 2>&1 \
+  --rpc-url "$RPC" --account "$account" --sender "$SENDER" --broadcast --verify 2>&1 \
   | tee /tmp/etherfi-deploy.log | sed -n '/== Logs ==/,/^##/p'
 PAYLOAD=$(grep 'EtherfiCashLaunchPayload (phase 1' /tmp/etherfi-deploy.log | grep -o '0x[0-9a-fA-F]\{40\}' | head -1)
 ACTIVATION=$(grep 'EtherfiCashActivationPayload (phase 2' /tmp/etherfi-deploy.log | grep -o '0x[0-9a-fA-F]\{40\}' | head -1)
