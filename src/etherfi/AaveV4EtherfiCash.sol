@@ -33,6 +33,14 @@ library AaveV4EtherfiCash {
   // The etherfi make targets pin FOUNDRY_LIBRARIES to this value; the preflight validator
   // blocks deployment until it has code on OP.
   address internal constant LIQUIDATION_LOGIC = 0x88dF535473C5adf1f57789734A05E555F7Deb8DB;
+
+  // guardian executors — STAGED (zero = not yet onboarded; EtherfiCashLaunchPayload skips
+  // zero entries, so these can be filled and the payload redeployed without logic changes).
+  // Guardian roles are one-way emergency stops only (pause/freeze/halt) — safe behind hot
+  // keys because they can never resume, loosen, or move anything.
+  address internal constant GUARDIAN_HYPERNATIVE =
+    address(0x9AF1298993DC1f397973C62A5D47a284CF76844D); // TBD — Hypernative executor
+  address internal constant GUARDIAN_CURATOR = 0x23c30c38d73a0D1609ffAAe47aA7d6D1a3e46f03; // TBD — curator automation EOA
 }
 
 /// @notice Hubs of the ether.fi Cash Aave V4 instance.

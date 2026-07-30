@@ -44,10 +44,15 @@ contract GenerateEtherfiCashLaunchSpecScript is EtherfiCashScriptBase {
       ' |\n| Caps + dynamic risk config operator | Operator Safe (Nonce Capital) ',
       vm.toString(AaveV4EtherfiCash.OPERATOR_SAFE),
       ' |\n\n',
-      'Operator roles carved out by the payload: HUB_CAPS_OPERATOR_ROLE (201) for ',
-      'updateSpokeCaps/updateSpokeAddCap/updateSpokeDrawCap on the HubConfigurator, and ',
-      'SPOKE_RISK_OPERATOR_ROLE (401) for addDynamicReserveConfig/updateDynamicReserveConfig ',
-      'on the SpokeConfigurator. Both roles are also granted to the Owner Safe.\n\n',
+      'Roles carved out by the payload: curator roles HUB_RISK_CURATOR_ROLE (201) for caps, ',
+      'IR data, liquidity fee, risk-premium threshold and un-halt on the HubConfigurator, ',
+      'and SPOKE_RISK_CURATOR_ROLE (401) for dynamic reserve config, collateral factor / max ',
+      'liquidation bonus / liquidation fee setters, reserve flags, liquidation-engine ',
+      'parameters and un-pause/un-freeze on the SpokeConfigurator, granted to the Operator ',
+      'Safe and the Owner Safe. Guardian roles HUB_GUARDIAN_ROLE (202, haltAsset/haltSpoke) ',
+      'and SPOKE_GUARDIAN_ROLE (402, pause/freeze reserves) hold ONE-WAY emergency stops ',
+      'only and are granted to both Safes plus the staged guardian executors (Hypernative / ',
+      'curator automation) once onboarded in the address book.\n\n',
       '## Specification\n\n'
     );
 

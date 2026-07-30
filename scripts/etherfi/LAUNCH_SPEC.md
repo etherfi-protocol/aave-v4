@@ -21,7 +21,9 @@ Two-phase launch of the ether.fi Cash Aave V4 whitelabel instance on OP Mainnet,
 | Instance owner / payload executor   | Owner Safe 0x082B85ED50F1cd120C597EF860ece712e54CE844                    |
 | Caps + dynamic risk config operator | Operator Safe (Nonce Capital) 0x23c30c38d73a0D1609ffAAe47aA7d6D1a3e46f03 |
 
-Operator roles carved out by the payload: HUB_CAPS_OPERATOR_ROLE (201) for updateSpokeCaps/updateSpokeAddCap/updateSpokeDrawCap on the HubConfigurator, and SPOKE_RISK_OPERATOR_ROLE (401) for addDynamicReserveConfig/updateDynamicReserveConfig on the SpokeConfigurator. Both roles are also granted to the Owner Safe.
+Roles carved out by the payload: curator roles HUB_RISK_CURATOR_ROLE (201) for caps, IR data, liquidity fee, risk-premium threshold and un-halt on the HubConfigurator, and SPOKE_RISK_CURATOR_ROLE (401) for dynamic reserve config, collateral factor / max liquidation bonus / liquidation fee setters, reserve flags, liquidation-engine parameters and un-pause/un-freeze on the SpokeConfigurator, granted to the Operator Safe and the Owner Safe. Guardian roles HUB_GUARDIAN_ROLE (202, haltAsset/haltSpoke) and SPOKE_GUARDIAN_ROLE (402, pause/freeze reserves) hold ONE-WAY emergency stops only and are granted to both Safes plus the staged guardian executors (Hypernative / curator automation) once onboarded in the address book.
+
+> NOTE: the payload bytecode changed with this role expansion — the launch/activation payload addresses in the table below are STALE and must be re-pinned from a clean-fork simulation before deployment.
 
 ## Specification
 
