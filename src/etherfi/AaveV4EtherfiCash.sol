@@ -47,8 +47,12 @@ library AaveV4EtherfiCash {
   // Guardian roles are one-way emergency stops only (pause/freeze/halt) — safe behind hot
   // keys because they can never resume, loosen, or move anything.
   address internal constant GUARDIAN_HYPERNATIVE =
-    address(0x9AF1298993DC1f397973C62A5D47a284CF76844D); // TBD — Hypernative executor
-  address internal constant GUARDIAN_CURATOR = 0x23c30c38d73a0D1609ffAAe47aA7d6D1a3e46f03; // TBD — curator automation EOA
+    address(0x9AF1298993DC1f397973C62A5D47a284CF76844D); // CONFIRMED — Hypernative executor
+  // Curator-automation slot: intentionally the Operator Safe until the automation KMS is set
+  // up (duplicate grant with the Safe's own guardian membership — harmless, AccessManager
+  // updates rather than reverts). Once the KMS EOA exists, grant it the guardian roles
+  // directly from the Owner Safe (grantRole 202/402) — no payload or constant change needed.
+  address internal constant GUARDIAN_CURATOR = 0x23c30c38d73a0D1609ffAAe47aA7d6D1a3e46f03;
 }
 
 /// @notice Hubs of the ether.fi Cash Aave V4 instance.

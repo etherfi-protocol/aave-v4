@@ -115,8 +115,10 @@ etherfi-launch-spec :;
 	forge script scripts/etherfi/GenerateEtherfiCashLaunchSpec.s.sol:GenerateEtherfiCashLaunchSpecScript --sig 'generate()' --rpc-url optimism
 
 # Deploy the stateless config engine (broadcast = 4 engine libraries + engine, all deterministic)
-# `make etherfi-deploy-engine account=<keystore>` (set dry=1 to simulate)
+# `make etherfi-deploy-engine account=<keystore> sender=<keystore address>` (set dry=1 to simulate)
+# --sender is required: the script simulates before the keystore unlocks, and forge refuses to
+# broadcast transactions simulated from its default sender.
 etherfi-deploy-engine :;
 	forge script scripts/etherfi/DeployEtherfiCashConfigEngine.s.sol:DeployEtherfiCashConfigEngineScript \
-	--rpc-url optimism --account ${account} --slow \
+	--rpc-url optimism --account ${account} --sender ${sender} --slow \
 	$(if ${dry},, --broadcast --verify) \
