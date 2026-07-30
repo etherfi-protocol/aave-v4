@@ -86,9 +86,20 @@ The deploy scripts assert every deployed address against the reviewed registry
 3. (Later, non-blocking) migration path to Aave's permissioned Spoke via proxy upgrade once
    available — per the 2026-07-27 agreement.
 
-## 8. Post-activation addendum (to be appended once the 3CP executes)
+## 8. Post-activation record — MARKET LIVE (2026-07-30)
 
-- Phase-1 / phase-2 execution tx hashes
-- `make etherfi-verify` output (VERIFIED — ACTIVE)
-- Final caps in effect for the internal-testing window (reduced from launch values by the
-  Operator Safe; to be restored to the sheet values at full production)
+Both launch transactions executed via the Owner Safe (3CP-613); the market is active and
+verified.
+
+| Phase                       | safeTxHash                                                           | execution tx                                                                                                                                                                  |
+| --------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 — launch (dormant config) | `0x3fc1253e48816c42978e0f652b184a6c68a55389861e440f61697be8a7022ef8` | [`0x6b83c289f3110a3e1a2aa23eaf4a61d7bbb281972319a5a1b3e33533988a2b16`](https://optimistic.etherscan.io/tx/0x6b83c289f3110a3e1a2aa23eaf4a61d7bbb281972319a5a1b3e33533988a2b16) |
+| 2 — activation              | `0xa4d6a046a0bd22ee5c30e78db09ef061460b73b4526309bef2d66a24759c571c` | [`0xc2905e08b1fe173911c70a78c5d880e522614c4f351e7030760e72668417aefc`](https://optimistic.etherscan.io/tx/0xc2905e08b1fe173911c70a78c5d880e522614c4f351e7030760e72668417aefc) |
+
+- `make etherfi-verify` → **VERIFIED: live state matches the launch payload spec (ACTIVE)** —
+  all 19 reserves, caps, curves, liquidation engine, curator/guardian roles, and the gated
+  spoke implementation confirmed on-chain against the parameter sheet.
+- Hub asset count: 19. Owner Safe nonce advanced 1 → 3.
+- Caps note: the Operator Safe reduces caps to token-sized limits for the internal-testing
+  window (supply is permissionless; borrow is gated to Cash Safes), to be restored to the
+  Section 5 / LAUNCH_SPEC values at full production.
