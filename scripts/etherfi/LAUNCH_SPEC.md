@@ -1,13 +1,13 @@
 # ether.fi Cash Aave V4 Instance on OP Mainnet - Launch Specification
 
-> Status: PRE-DEPLOYMENT. All instance and payload addresses below are PREDICTED from a full fork
-> simulation run as the launch deployer (CREATE2, reproduce-or-revert). The AaveOracle and Cash
-> Spoke additionally require the deployer to start at nonce 3 with no interleaved transactions.
-> Spoke implementation: EtherFiSpokeInstance (borrow gated to Cash Safes), linked against the
-> CANONICAL Aave LiquidationLogic 0x88dF535473C5adf1f57789734A05E555F7Deb8DB — now LIVE on OP
-> Mainnet (pre-deployed 2026-07-30, source-verified). The pin lives in the etherfi make targets.
-> Reproduction: clean clone -> FOUNDRY_LIBRARIES pinned by tooling -> forge build ->
-> DeployEtherfiCashInstance (deployer nonce 3) -> registry check must pass.
+> Status: PRE-DEPLOYMENT. Instance addresses are PREDICTED (CREATE2, reproduce-or-revert; the
+> AaveOracle and Cash Spoke additionally require the launch deployer at nonce 3, no interleaved
+> transactions — the deployer sends ONLY the instance deployment; engine and payloads deploy
+> from a different account). Payload addresses below are the PRODUCTION (script-broadcast)
+> CREATE2 addresses via the standard factory — note: addresses logged by the fork REHEARSAL
+> TEST differ (test-context CREATE2 deployer) and must never be used as pins. Spoke links the
+> canonical LiquidationLogic 0x88dF535473C5adf1f57789734A05E555F7Deb8DB, LIVE on OP
+> (pre-deployed 2026-07-30, source-verified).
 
 ## Summary
 
@@ -60,8 +60,8 @@ Roles carved out by the payload: curator roles HUB_RISK_CURATOR_ROLE (201) for c
 
 | Contract                                         | Address                                    |
 | ------------------------------------------------ | ------------------------------------------ |
-| Launch payload (phase 1, dormant config)         | 0x55fF65A3Fb3Ef36cE5193408f01E4da19313602b |
-| Activation payload (phase 2)                     | 0x7E30C8Fd5C59c929798911926cFaed02b0Cb5FbB |
+| Launch payload (phase 1, dormant config)         | 0xBc0D2823611cb0C1c1a598DdC4d051289E368449 |
+| Activation payload (phase 2)                     | 0x5F64dE77e63E9CDfF87d818FA373c8593b0b20f3 |
 | Owner Safe                                       | 0x082B85ED50F1cd120C597EF860ece712e54CE844 |
 | Operator Safe                                    | 0x23c30c38d73a0D1609ffAAe47aA7d6D1a3e46f03 |
 | AccessManager                                    | 0x188d7173772499FB6375F23FdFd130CE6107286b |
