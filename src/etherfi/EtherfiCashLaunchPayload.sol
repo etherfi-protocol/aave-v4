@@ -34,9 +34,11 @@ import {IAssetInterestRateStrategy} from 'src/hub/interfaces/IAssetInterestRateS
 /// verified and the Owner Safe executes EtherfiCashActivationPayload (phase 2).
 ///
 /// Executes, in the AaveV4Payload fixed order:
-///   1. AccessManager actions, in the engine's fixed sub-order: grants the two operator roles
-///      to the Operator Safe (Nonce risk curator) and the Owner Safe, labels them, then
-///      reassigns the cap / dynamic-config selectors to them.
+///   1. AccessManager actions, in the engine's fixed sub-order: grants the curator roles
+///      (201/401) to the Operator Safe (Nonce risk curator) and the Owner Safe and the
+///      guardian roles (202/402) to both Safes plus the staged guardian executors, labels all
+///      four roles, then reassigns the curator parameter selectors and the guardian one-way
+///      stop selectors to them (see the role notes above the role ID constants).
 ///   2. Hub asset listings — every launch asset, with its interest rate curve and liquidity fee.
 ///   3. Hub spoke-to-assets addition — registers the Cash Spoke for every launch asset with its
 ///      add/draw caps, DORMANT (active = false).
@@ -78,11 +80,30 @@ contract EtherfiCashLaunchPayload is AaveV4Payload {
   uint256 public constant TARGET_HEALTH_FACTOR = 1.24e18; // WAD
   uint256 public constant HEALTH_FACTOR_FOR_MAX_BONUS = 0.9e18; // WAD
 
-  // ------------------------------- operator roles (Nonce curator) -----------------------------
+  // ------------------------- curator + guardian roles (Nonce curator) -------------------------
   // Granular roles carved out of the configurator domain-admin roles, following the Roles.sol
   // evolution rules (next free IDs; domain admins are granted the new roles to retain access).
-  uint64 public constant HUB_CAPS_OPERATOR_ROLE = 201; // updateSpokeCaps / AddCap / DrawCap
-  uint64 public constant SPOKE_RISK_OPERATOR_ROLE = 401; // add/updateDynamicReserveConfig
+  //
+  // Curator roles (Operator Safe + Owner Safe): day-to-day market management — caps, IR data,
+  // liquidity fee, risk-premium threshold, dynamic reserve config, collateral factor / max
+  // liquidation bonus / liquidation fee setters, reserve flags, liquidation-engine parameters,
+  // and the resume switches (un-halt / un-pause / un-freeze).
+  //
+  // Guardian roles (Safes + staged Hypernative / automation executors, see the address book):
+  // ONE-WAY EMERGENCY STOPS ONLY (halt / pause / freeze). The resume switches are deliberately
+  // on the curator roles instead, so a compromised guardian hot key can at worst cause a
+  // recoverable outage — it can never re-open a market mid-incident, loosen a parameter, or
+  // move funds. Do not add bidirectional selectors to the guardian roles.
+  //
+  // CURATOR COMPROMISE BOUND — deliberately NOT delegated (stay on domain-admin 200/400, Owner
+  // Safe only): updateReservePriceSource (oracle swap), updatePositionManager (see the SECURITY
+  // INVARIANT in EtherFiSpokeInstance), asset/reserve/spoke listings, activation/deactivation,
+  // cap resets, fee receiver/config, IR-strategy and reinvestment-controller contract swaps,
+  // receive-shares flag, and the whole-struct updateLiquidationConfig.
+  uint64 public constant HUB_RISK_CURATOR_ROLE = 201;
+  uint64 public constant HUB_GUARDIAN_ROLE = 202;
+  uint64 public constant SPOKE_RISK_CURATOR_ROLE = 401;
+  uint64 public constant SPOKE_GUARDIAN_ROLE = 402;
 
   // ------------------------------- shared reserve parameters ----------------------------------
   uint16 internal constant LIQUIDATION_FEE = 10_00; // 10% for every reserve
@@ -332,80 +353,146 @@ contract EtherfiCashLaunchPayload is AaveV4Payload {
   //                                       payload actions
   // ============================================================================================
 
-  /// @notice Labels the two new operator roles on the AccessManager.
+  /// @notice Labels the curator and guardian roles on the AccessManager.
   function accessManagerRoleUpdates()
     public
     pure
     override
     returns (IAaveV4ConfigEngine.RoleUpdate[] memory updates)
   {
-    updates = new IAaveV4ConfigEngine.RoleUpdate[](2);
-    updates[0] = IAaveV4ConfigEngine.RoleUpdate({
-      authority: AaveV4EtherfiCash.ACCESS_MANAGER,
-      roleId: HUB_CAPS_OPERATOR_ROLE,
-      admin: EngineFlags.KEEP_CURRENT_UINT64,
-      guardian: EngineFlags.KEEP_CURRENT_UINT64,
-      grantDelay: EngineFlags.KEEP_CURRENT_UINT32,
-      label: 'HUB_CAPS_OPERATOR_ROLE',
-      labelUpdate: false
-    });
-    updates[1] = IAaveV4ConfigEngine.RoleUpdate({
-      authority: AaveV4EtherfiCash.ACCESS_MANAGER,
-      roleId: SPOKE_RISK_OPERATOR_ROLE,
-      admin: EngineFlags.KEEP_CURRENT_UINT64,
-      guardian: EngineFlags.KEEP_CURRENT_UINT64,
-      grantDelay: EngineFlags.KEEP_CURRENT_UINT32,
-      label: 'SPOKE_RISK_OPERATOR_ROLE',
-      labelUpdate: false
-    });
+    updates = new IAaveV4ConfigEngine.RoleUpdate[](4);
+    updates[0] = _label(HUB_RISK_CURATOR_ROLE, 'HUB_RISK_CURATOR_ROLE');
+    updates[1] = _label(HUB_GUARDIAN_ROLE, 'HUB_GUARDIAN_ROLE');
+    updates[2] = _label(SPOKE_RISK_CURATOR_ROLE, 'SPOKE_RISK_CURATOR_ROLE');
+    updates[3] = _label(SPOKE_GUARDIAN_ROLE, 'SPOKE_GUARDIAN_ROLE');
   }
 
-  /// @notice Moves the cap / dynamic-config selectors from the domain-admin roles (200/400)
-  /// to the new granular operator roles (201/401).
+  /// @notice Moves the curator parameter selectors and the guardian stop selectors from the
+  /// domain-admin roles (200/400) to the curator (201/401) and guardian (202/402) roles.
   function accessManagerTargetFunctionRoleUpdates()
     public
     pure
     override
     returns (IAaveV4ConfigEngine.TargetFunctionRoleUpdate[] memory updates)
   {
-    bytes4[] memory hubSelectors = new bytes4[](3);
-    hubSelectors[0] = IHubConfigurator.updateSpokeCaps.selector;
-    hubSelectors[1] = IHubConfigurator.updateSpokeAddCap.selector;
-    hubSelectors[2] = IHubConfigurator.updateSpokeDrawCap.selector;
+    // hub curator: caps, IR/fee/threshold parameters, resume-after-halt
+    bytes4[] memory hubCuratorSelectors = new bytes4[](7);
+    hubCuratorSelectors[0] = IHubConfigurator.updateSpokeCaps.selector;
+    hubCuratorSelectors[1] = IHubConfigurator.updateSpokeAddCap.selector;
+    hubCuratorSelectors[2] = IHubConfigurator.updateSpokeDrawCap.selector;
+    hubCuratorSelectors[3] = IHubConfigurator.updateInterestRateData.selector;
+    hubCuratorSelectors[4] = IHubConfigurator.updateLiquidityFee.selector;
+    hubCuratorSelectors[5] = IHubConfigurator.updateSpokeRiskPremiumThreshold.selector;
+    hubCuratorSelectors[6] = IHubConfigurator.updateSpokeHalted.selector;
 
-    bytes4[] memory spokeSelectors = new bytes4[](2);
-    spokeSelectors[0] = ISpokeConfigurator.addDynamicReserveConfig.selector;
-    spokeSelectors[1] = ISpokeConfigurator.updateDynamicReserveConfig.selector;
+    // hub guardian: one-way stops only (see the GUARDIAN note above the role IDs)
+    bytes4[] memory hubGuardianSelectors = new bytes4[](2);
+    hubGuardianSelectors[0] = IHubConfigurator.haltAsset.selector;
+    hubGuardianSelectors[1] = IHubConfigurator.haltSpoke.selector;
 
-    updates = new IAaveV4ConfigEngine.TargetFunctionRoleUpdate[](2);
+    // spoke curator: dynamic reserve config, liquidation-economics field setters, reserve
+    // flags, liquidation-engine parameters, resume-after-pause/freeze
+    bytes4[] memory spokeCuratorSelectors = new bytes4[](15);
+    spokeCuratorSelectors[0] = ISpokeConfigurator.addDynamicReserveConfig.selector;
+    spokeCuratorSelectors[1] = ISpokeConfigurator.updateDynamicReserveConfig.selector;
+    spokeCuratorSelectors[2] = ISpokeConfigurator.addCollateralFactor.selector;
+    spokeCuratorSelectors[3] = ISpokeConfigurator.updateCollateralFactor.selector;
+    spokeCuratorSelectors[4] = ISpokeConfigurator.addMaxLiquidationBonus.selector;
+    spokeCuratorSelectors[5] = ISpokeConfigurator.updateMaxLiquidationBonus.selector;
+    spokeCuratorSelectors[6] = ISpokeConfigurator.addLiquidationFee.selector;
+    spokeCuratorSelectors[7] = ISpokeConfigurator.updateLiquidationFee.selector;
+    spokeCuratorSelectors[8] = ISpokeConfigurator.updateBorrowable.selector;
+    spokeCuratorSelectors[9] = ISpokeConfigurator.updateCollateralRisk.selector;
+    spokeCuratorSelectors[10] = ISpokeConfigurator.updateLiquidationTargetHealthFactor.selector;
+    spokeCuratorSelectors[11] = ISpokeConfigurator.updateHealthFactorForMaxBonus.selector;
+    spokeCuratorSelectors[12] = ISpokeConfigurator.updateLiquidationBonusFactor.selector;
+    spokeCuratorSelectors[13] = ISpokeConfigurator.updatePaused.selector;
+    spokeCuratorSelectors[14] = ISpokeConfigurator.updateFrozen.selector;
+
+    // spoke guardian: one-way stops only (see the GUARDIAN note above the role IDs)
+    bytes4[] memory spokeGuardianSelectors = new bytes4[](4);
+    spokeGuardianSelectors[0] = ISpokeConfigurator.pauseReserve.selector;
+    spokeGuardianSelectors[1] = ISpokeConfigurator.freezeReserve.selector;
+    spokeGuardianSelectors[2] = ISpokeConfigurator.pauseAllReserves.selector;
+    spokeGuardianSelectors[3] = ISpokeConfigurator.freezeAllReserves.selector;
+
+    updates = new IAaveV4ConfigEngine.TargetFunctionRoleUpdate[](4);
     updates[0] = IAaveV4ConfigEngine.TargetFunctionRoleUpdate({
       authority: AaveV4EtherfiCash.ACCESS_MANAGER,
       target: AaveV4EtherfiCash.HUB_CONFIGURATOR,
-      selectors: hubSelectors,
-      roleId: HUB_CAPS_OPERATOR_ROLE
+      selectors: hubCuratorSelectors,
+      roleId: HUB_RISK_CURATOR_ROLE
     });
     updates[1] = IAaveV4ConfigEngine.TargetFunctionRoleUpdate({
       authority: AaveV4EtherfiCash.ACCESS_MANAGER,
+      target: AaveV4EtherfiCash.HUB_CONFIGURATOR,
+      selectors: hubGuardianSelectors,
+      roleId: HUB_GUARDIAN_ROLE
+    });
+    updates[2] = IAaveV4ConfigEngine.TargetFunctionRoleUpdate({
+      authority: AaveV4EtherfiCash.ACCESS_MANAGER,
       target: AaveV4EtherfiCash.SPOKE_CONFIGURATOR,
-      selectors: spokeSelectors,
-      roleId: SPOKE_RISK_OPERATOR_ROLE
+      selectors: spokeCuratorSelectors,
+      roleId: SPOKE_RISK_CURATOR_ROLE
+    });
+    updates[3] = IAaveV4ConfigEngine.TargetFunctionRoleUpdate({
+      authority: AaveV4EtherfiCash.ACCESS_MANAGER,
+      target: AaveV4EtherfiCash.SPOKE_CONFIGURATOR,
+      selectors: spokeGuardianSelectors,
+      roleId: SPOKE_GUARDIAN_ROLE
     });
   }
 
-  /// @notice Grants the operator roles to the Operator Safe (Nonce risk curator) and to the
-  /// Owner Safe — required by the Roles.sol evolution rules, since reassigning selectors away
-  /// from the domain-admin roles would otherwise strip the Owner Safe of cap/risk access.
+  /// @notice Grants the curator roles to the Operator Safe (Nonce risk curator) and the Owner
+  /// Safe — required by the Roles.sol evolution rules, since reassigning selectors away from
+  /// the domain-admin roles would otherwise strip the Owner Safe of cap/risk access — and the
+  /// guardian roles to both Safes plus the staged guardian executors from the address book
+  /// (zero entries skipped until onboarded).
   function accessManagerRoleMemberships()
     public
     pure
     override
     returns (IAaveV4ConfigEngine.RoleMembership[] memory memberships)
   {
-    memberships = new IAaveV4ConfigEngine.RoleMembership[](4);
-    memberships[0] = _grant(HUB_CAPS_OPERATOR_ROLE, AaveV4EtherfiCash.OPERATOR_SAFE);
-    memberships[1] = _grant(SPOKE_RISK_OPERATOR_ROLE, AaveV4EtherfiCash.OPERATOR_SAFE);
-    memberships[2] = _grant(HUB_CAPS_OPERATOR_ROLE, AaveV4EtherfiCash.OWNER_SAFE);
-    memberships[3] = _grant(SPOKE_RISK_OPERATOR_ROLE, AaveV4EtherfiCash.OWNER_SAFE);
+    address[4] memory guardians = [
+      AaveV4EtherfiCash.OWNER_SAFE,
+      AaveV4EtherfiCash.OPERATOR_SAFE,
+      AaveV4EtherfiCash.GUARDIAN_HYPERNATIVE,
+      AaveV4EtherfiCash.GUARDIAN_CURATOR
+    ];
+    uint256 guardianCount;
+    for (uint256 i; i < guardians.length; i++) {
+      if (guardians[i] != address(0)) guardianCount++;
+    }
+
+    memberships = new IAaveV4ConfigEngine.RoleMembership[](4 + guardianCount * 2);
+    memberships[0] = _grant(HUB_RISK_CURATOR_ROLE, AaveV4EtherfiCash.OPERATOR_SAFE);
+    memberships[1] = _grant(SPOKE_RISK_CURATOR_ROLE, AaveV4EtherfiCash.OPERATOR_SAFE);
+    memberships[2] = _grant(HUB_RISK_CURATOR_ROLE, AaveV4EtherfiCash.OWNER_SAFE);
+    memberships[3] = _grant(SPOKE_RISK_CURATOR_ROLE, AaveV4EtherfiCash.OWNER_SAFE);
+
+    uint256 j = 4;
+    for (uint256 i; i < guardians.length; i++) {
+      if (guardians[i] == address(0)) continue;
+      memberships[j++] = _grant(HUB_GUARDIAN_ROLE, guardians[i]);
+      memberships[j++] = _grant(SPOKE_GUARDIAN_ROLE, guardians[i]);
+    }
+  }
+
+  function _label(
+    uint64 roleId,
+    string memory label
+  ) internal pure returns (IAaveV4ConfigEngine.RoleUpdate memory) {
+    return
+      IAaveV4ConfigEngine.RoleUpdate({
+        authority: AaveV4EtherfiCash.ACCESS_MANAGER,
+        roleId: roleId,
+        admin: EngineFlags.KEEP_CURRENT_UINT64,
+        guardian: EngineFlags.KEEP_CURRENT_UINT64,
+        grantDelay: EngineFlags.KEEP_CURRENT_UINT32,
+        label: label,
+        labelUpdate: false
+      });
   }
 
   function _grant(

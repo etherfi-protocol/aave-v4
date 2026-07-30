@@ -4,14 +4,8 @@
 > simulation run as the launch deployer (CREATE2, reproduce-or-revert). The AaveOracle and Cash
 > Spoke additionally require the deployer to start at nonce 3 with no interleaved transactions.
 > Spoke implementation: EtherFiSpokeInstance (borrow gated to Cash Safes), linked against the
-> CANONICAL Aave LiquidationLogic 0x88dF535473C5adf1f57789734A05E555F7Deb8DB (same address as
-> Ethereum mainnet; the pin lives in the etherfi make targets, not machine-local .env). The
-> library was pre-deployed on OP on 2026-07-30 via `make etherfi-predeploy-liquidationlogic`
-> (Safe Singleton Factory + the canonical salt from the Ethereum mainnet creation tx; the
-> CREATE2 address assertion proves the OP runtime code is byte-identical to the canonical
-> library) and its source is verified on OP Etherscan. It was broadcast from an account
-> OTHER than the launch deployer, keeping the deployer at nonce 3. The preflight validator
-> checks the canonical library has code on OP Mainnet.
+> CANONICAL Aave LiquidationLogic 0x88dF535473C5adf1f57789734A05E555F7Deb8DB — now LIVE on OP
+> Mainnet (pre-deployed 2026-07-30, source-verified). The pin lives in the etherfi make targets.
 > Reproduction: clean clone -> FOUNDRY_LIBRARIES pinned by tooling -> forge build ->
 > DeployEtherfiCashInstance (deployer nonce 3) -> registry check must pass.
 
@@ -26,7 +20,7 @@ Two-phase launch of the ether.fi Cash Aave V4 whitelabel instance on OP Mainnet,
 | Instance owner / payload executor   | Owner Safe 0x082B85ED50F1cd120C597EF860ece712e54CE844                    |
 | Caps + dynamic risk config operator | Operator Safe (Nonce Capital) 0x23c30c38d73a0D1609ffAAe47aA7d6D1a3e46f03 |
 
-Operator roles carved out by the payload: HUB_CAPS_OPERATOR_ROLE (201) for updateSpokeCaps/updateSpokeAddCap/updateSpokeDrawCap on the HubConfigurator, and SPOKE_RISK_OPERATOR_ROLE (401) for addDynamicReserveConfig/updateDynamicReserveConfig on the SpokeConfigurator. Both roles are also granted to the Owner Safe.
+Roles carved out by the payload: curator roles HUB_RISK_CURATOR_ROLE (201) for caps, IR data, liquidity fee, risk-premium threshold and un-halt on the HubConfigurator, and SPOKE_RISK_CURATOR_ROLE (401) for dynamic reserve config, collateral factor / max liquidation bonus / liquidation fee setters, reserve flags, liquidation-engine parameters and un-pause/un-freeze on the SpokeConfigurator, granted to the Operator Safe and the Owner Safe. Guardian roles HUB_GUARDIAN_ROLE (202, haltAsset/haltSpoke) and SPOKE_GUARDIAN_ROLE (402, pause/freeze reserves) hold ONE-WAY emergency stops only and are granted to both Safes plus the staged guardian executors (Hypernative / curator automation) once onboarded in the address book.
 
 ## Specification
 
@@ -66,8 +60,8 @@ Operator roles carved out by the payload: HUB_CAPS_OPERATOR_ROLE (201) for updat
 
 | Contract                                         | Address                                    |
 | ------------------------------------------------ | ------------------------------------------ |
-| Launch payload (phase 1, dormant config)         | 0x45b1F1A2E02b7Ed68DE68fa42B819C7EE22f16c6 |
-| Activation payload (phase 2)                     | 0x5F64dE77e63E9CDfF87d818FA373c8593b0b20f3 |
+| Launch payload (phase 1, dormant config)         | 0x55fF65A3Fb3Ef36cE5193408f01E4da19313602b |
+| Activation payload (phase 2)                     | 0x7E30C8Fd5C59c929798911926cFaed02b0Cb5FbB |
 | Owner Safe                                       | 0x082B85ED50F1cd120C597EF860ece712e54CE844 |
 | Operator Safe                                    | 0x23c30c38d73a0D1609ffAAe47aA7d6D1a3e46f03 |
 | AccessManager                                    | 0x188d7173772499FB6375F23FdFd130CE6107286b |

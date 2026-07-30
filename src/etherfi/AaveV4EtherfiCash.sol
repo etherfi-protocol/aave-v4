@@ -41,6 +41,14 @@ library AaveV4EtherfiCash {
   // AaveOracle and Cash Spoke pins depend on it); every other launch transaction
   // (LiquidationLogic pre-deploy, config engine) must come from a different account
   address internal constant LAUNCH_DEPLOYER = 0xf8a86ea1Ac39EC529814c377Bd484387D395421e;
+
+  // guardian executors — STAGED (zero = not yet onboarded; EtherfiCashLaunchPayload skips
+  // zero entries, so these can be filled and the payload redeployed without logic changes).
+  // Guardian roles are one-way emergency stops only (pause/freeze/halt) — safe behind hot
+  // keys because they can never resume, loosen, or move anything.
+  address internal constant GUARDIAN_HYPERNATIVE =
+    address(0x9AF1298993DC1f397973C62A5D47a284CF76844D); // TBD — Hypernative executor
+  address internal constant GUARDIAN_CURATOR = 0x23c30c38d73a0D1609ffAAe47aA7d6D1a3e46f03; // TBD — curator automation EOA
 }
 
 /// @notice Hubs of the ether.fi Cash Aave V4 instance.

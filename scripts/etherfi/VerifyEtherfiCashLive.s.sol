@@ -15,8 +15,7 @@ import {IHub} from 'src/hub/interfaces/IHub.sol';
 import {ISpoke} from 'src/spoke/interfaces/ISpoke.sol';
 import {IAssetInterestRateStrategy} from 'src/hub/interfaces/IAssetInterestRateStrategy.sol';
 import {IAccessManager} from 'src/dependencies/openzeppelin/IAccessManager.sol';
-import {IHubConfigurator} from 'src/hub/interfaces/IHubConfigurator.sol';
-import {ISpokeConfigurator} from 'src/spoke/interfaces/ISpokeConfigurator.sol';
+import {IAaveV4ConfigEngine} from 'src/config-engine/interfaces/IAaveV4ConfigEngine.sol';
 
 /// @title VerifyEtherfiCashLive
 /// @notice Read-only check that the LIVE hub/spoke state matches the launch payload spec —
@@ -130,35 +129,50 @@ contract VerifyEtherfiCashLiveScript is EtherfiCashScriptBase {
       expectedPayload.HEALTH_FACTOR_FOR_MAX_BONUS()
     );
 
-    // operator role wiring (Owner + Operator Safes, selector reassignments)
+    // curator + guardian role wiring (memberships and selector reassignments; every selector
+    // moved by the payload is checked, so a selector accidentally left on the domain-admin
+    // roles (200/400) — or moved to the wrong role — fails verification)
     IAccessManager accessManager = IAccessManager(AaveV4EtherfiCash.ACCESS_MANAGER);
-    uint64 hubRole = expectedPayload.HUB_CAPS_OPERATOR_ROLE();
-    uint64 spokeRole = expectedPayload.SPOKE_RISK_OPERATOR_ROLE();
+    uint64 hubCurator = expectedPayload.HUB_RISK_CURATOR_ROLE();
+    uint64 hubGuardian = expectedPayload.HUB_GUARDIAN_ROLE();
+    uint64 spokeCurator = expectedPayload.SPOKE_RISK_CURATOR_ROLE();
+    uint64 spokeGuardian = expectedPayload.SPOKE_GUARDIAN_ROLE();
+
     address[2] memory safes = [AaveV4EtherfiCash.OPERATOR_SAFE, AaveV4EtherfiCash.OWNER_SAFE];
     for (uint256 i; i < safes.length; i++) {
-      (bool isMember, ) = accessManager.hasRole(hubRole, safes[i]);
-      _check('accessManager', 'hasRole(hubCaps)', isMember ? 1 : 0, 1);
-      (isMember, ) = accessManager.hasRole(spokeRole, safes[i]);
-      _check('accessManager', 'hasRole(spokeRisk)', isMember ? 1 : 0, 1);
+      (bool isMember, ) = accessManager.hasRole(hubCurator, safes[i]);
+      _check('accessManager', 'hasRole(hubCurator)', isMember ? 1 : 0, 1);
+      (isMember, ) = accessManager.hasRole(spokeCurator, safes[i]);
+      _check('accessManager', 'hasRole(spokeCurator)', isMember ? 1 : 0, 1);
+      (isMember, ) = accessManager.hasRole(hubGuardian, safes[i]);
+      _check('accessManager', 'hasRole(hubGuardian)', isMember ? 1 : 0, 1);
+      (isMember, ) = accessManager.hasRole(spokeGuardian, safes[i]);
+      _check('accessManager', 'hasRole(spokeGuardian)', isMember ? 1 : 0, 1);
     }
-    _check(
-      'accessManager',
-      'updateSpokeCaps role',
-      accessManager.getTargetFunctionRole(
-        AaveV4EtherfiCash.HUB_CONFIGURATOR,
-        IHubConfigurator.updateSpokeCaps.selector
-      ),
-      hubRole
-    );
-    _check(
-      'accessManager',
-      'updateDynamicReserveConfig role',
-      accessManager.getTargetFunctionRole(
-        AaveV4EtherfiCash.SPOKE_CONFIGURATOR,
-        ISpokeConfigurator.updateDynamicReserveConfig.selector
-      ),
-      spokeRole
-    );
+    address[2] memory stagedGuardians = [
+      AaveV4EtherfiCash.GUARDIAN_HYPERNATIVE,
+      AaveV4EtherfiCash.GUARDIAN_CURATOR
+    ];
+    for (uint256 i; i < stagedGuardians.length; i++) {
+      if (stagedGuardians[i] == address(0)) continue;
+      (bool isMember, ) = accessManager.hasRole(hubGuardian, stagedGuardians[i]);
+      _check('accessManager', 'hasRole(hubGuardian,executor)', isMember ? 1 : 0, 1);
+      (isMember, ) = accessManager.hasRole(spokeGuardian, stagedGuardians[i]);
+      _check('accessManager', 'hasRole(spokeGuardian,executor)', isMember ? 1 : 0, 1);
+    }
+
+    IAaveV4ConfigEngine.TargetFunctionRoleUpdate[] memory fnUpdates = expectedPayload
+      .accessManagerTargetFunctionRoleUpdates();
+    for (uint256 i; i < fnUpdates.length; i++) {
+      for (uint256 j; j < fnUpdates[i].selectors.length; j++) {
+        _check(
+          'accessManager',
+          string.concat('selector role (', vm.toString(fnUpdates[i].roleId), ')'),
+          accessManager.getTargetFunctionRole(fnUpdates[i].target, fnUpdates[i].selectors[j]),
+          fnUpdates[i].roleId
+        );
+      }
+    }
 
     require(mismatches == 0, string.concat('MISMATCHES: ', vm.toString(mismatches)));
     console2.log(
