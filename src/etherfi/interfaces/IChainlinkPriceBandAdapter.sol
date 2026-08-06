@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: LicenseRef-BUSL
+pragma solidity 0.8.28;
+
+/// @title IChainlinkAggregator
+/// @notice The subset of the Chainlink aggregator surface this adapter consumes and re-exposes.
+/// @dev Deliberately minimal. `getRoundData` and `latestRound` are the two members that make a
+///      previous-round reference possible without any stored state.
+interface IChainlinkAggregator {
+  function decimals() external view returns (uint8);
+
+  function description() external view returns (string memory);
+
+  function latestAnswer() external view returns (int256);
+
+  function latestTimestamp() external view returns (uint256);
+
+  function latestRound() external view returns (uint256);
+
+  function latestRoundData()
+    external
+    view
+    returns (
+      uint80 roundId,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    );
+
+  function getRoundData(
+    uint80 roundId
+  )
+    external
+    view
+    returns (
+      uint80 id,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    );
+}
+
+/// @title IChainlinkPriceBandAdapter
+/// @notice A Chainlink feed wrapped so a single round cannot raise the reported price by more than
+///         a configured percentage over the feed's own previous round.
+interface IChainlinkPriceBandAdapter is IChainlinkAggregator {
+  /// @notice Thrown when the wrapped feed reports a non-positive answer.
+  error InvalidPrice();
+  /// @notice Thrown when the feed address is zero.
+  error FeedIsZeroAddress();
+  /// @notice Thrown when the configured band is outside [MIN_BAND_BPS, MAX_BAND_BPS].
+  error InvalidBand(uint16 bandBps);
+
+  /// @notice The wrapped Chainlink feed.
+  function FEED() external view returns (IChainlinkAggregator);
+
+  /// @notice Maximum permitted rise over the previous round, in basis points.
+  function BAND_BPS() external view returns (uint16);
+
+  /// @notice The feed's unmodified latest answer, before the band is applied.
+  function rawAnswer() external view returns (int256);
+
+  /// @notice The previous round's answer, which the band is measured against.
+  /// @return answer The reference answer, or 0 when no reference is available.
+  function referenceAnswer() external view returns (int256 answer);
+
+  /// @notice Whether a previous-round reference could be read.
+  /// @dev False means the band is inert for this round and the raw answer passes through: the
+  ///      feed is on the first round of a phase, or `getRoundData` reverted. Monitor this — a view
+  ///      contract cannot emit, so this getter is the only signal that the band is not protecting.
+  function hasReference() external view returns (bool);
+
+  /// @notice Whether the band is currently clamping the reported price.
+  function isCapped() external view returns (bool);
+}
