@@ -7,8 +7,9 @@ import {
 } from 'src/etherfi/interfaces/IChainlinkPriceBandAdapter.sol';
 
 /// @title ChainlinkPriceBandAdapter
-/// @notice Wraps a Chainlink price feed so that a single round cannot raise the reported price by
-///         more than `BAND_BPS` over that feed's own previous round. Falls pass through untouched.
+/// @notice Wraps a Chainlink price feed so that a single round cannot move the reported price by
+///         more than `BAND_BPS` in either direction, measured against that feed's own previous
+///         round. A rate limiter on price change, not a hard ceiling or floor.
 ///
 /// @dev WHY A BAND AND NOT A GROWTH CAP
 ///      Aave's CAPO adapters bound a *ratio* to a line that grows from a fixed snapshot. That is
@@ -28,12 +29,23 @@ import {
 ///      moved, so a long gap means nothing happened. Scaling an allowance by elapsed time therefore
 ///      grants the most room exactly when it is least needed. A flat band is the honest model.
 ///
-/// @dev WHY UPWARD ONLY
-///      A floor would convert a market loss into protocol bad debt: collateral keeps pricing above
-///      what it is worth, liquidators will not bid, and the shortfall lands on suppliers. Aave's
-///      own cap adapters clamp upward only for the same reason. If a downward bound is ever wanted
-///      it belongs at the point of *ingestion* (reject the update, let staleness fire) rather than
-///      here, where clamping would serve a knowingly wrong price indefinitely.
+/// @dev WHY BOTH DIRECTIONS
+///      A manipulated *downward* print is as damaging as an upward one, and lands on a different
+///      party: healthy positions are marked underwater and liquidated at a price that never
+///      existed, which is irreversible for the borrower. An upward-only bound leaves that open.
+///
+///      The usual objection to a floor - that it hides insolvency and lets bad debt accrue - does
+///      not apply here, because the reference is the FEED's own previous round, never this
+///      adapter's clamped output. A genuine crash therefore converges in a bounded number of
+///      rounds rather than being held up indefinitely. With a 20% band:
+///
+///        round N    feed 100  ->  reports 100
+///        round N+1  feed  50  ->  reference 100, floor 80  ->  reports 80   (one round behind)
+///        round N+2  feed  50  ->  reference  50, floor 40  ->  reports 50   (caught up)
+///
+///      In general a move of X% converges in ceil(X / BAND_BPS) rounds, so the band is a rate
+///      limit on price change rather than a bound on price. That is what makes a floor safe: it
+///      buys time to notice a manipulation without ever permanently mispricing collateral.
 ///
 /// @dev SIZING THE BAND
 ///      Anchor it to market structure, not to fitted volatility. US equities have mandated
@@ -45,6 +57,10 @@ import {
 ///
 ///      A band that clamps in normal markets is worse than none: it trains operators to ignore it.
 ///
+///      With a two-sided band the choice also sets how fast a real crash propagates: a move of X%
+///      needs ceil(X / BAND_BPS) rounds to be fully reflected. At 2000 bps a 40% crash is one round
+///      behind; at 100 bps it would be nineteen, which is why the floor on BAND_BPS is not 100.
+///
 /// @dev STATELESS BY CONSTRUCTION
 ///      The reference is the feed's own previous round, read through `getRoundData`, so there is no
 ///      snapshot, no keeper, and no re-snapshot cadence for anyone to own and forget. The cost is
@@ -53,11 +69,13 @@ contract ChainlinkPriceBandAdapter is IChainlinkPriceBandAdapter {
   uint256 internal constant BPS = 10_000;
 
   /// @notice Tightest permitted band.
-  /// @dev Both target feeds publish on a 0.5% deviation threshold, and that threshold is a trigger
-  ///      rather than a bound - PAXG printed 6.92% in one round against it. A band under 1% would
-  ///      clamp routine movement and pin the price to the previous round, so it is refused rather
-  ///      than left as a footgun.
-  uint16 public constant MIN_BAND_BPS = 100;
+  /// @dev Two constraints meet here. Both target feeds publish on a 0.5% deviation threshold, and
+  ///      that threshold is a trigger rather than a bound - PAXG printed 6.92% in one round against
+  ///      it - so a band near the threshold would clamp routine movement. And because the band is
+  ///      two-sided, it also rate-limits how fast a genuine crash reaches consumers: X% takes
+  ///      ceil(X / BAND_BPS) rounds. 500 bps is ten times the deviation threshold and bounds a 50%
+  ///      crash to ten rounds. Tighter than this is refused rather than left as a footgun.
+  uint16 public constant MIN_BAND_BPS = 500;
 
   /// @notice Loosest permitted band. A band at or above 100% cannot bind on any rise.
   uint16 public constant MAX_BAND_BPS = 10_000;
@@ -177,10 +195,13 @@ contract ChainlinkPriceBandAdapter is IChainlinkPriceBandAdapter {
     (int256 refPrice, bool available) = _reference();
     if (!available) return (roundId, answer, startedAt, updatedAt, raw);
 
-    // refPrice is positive and bandBps <= 10_000, so this cannot overflow for any answer a
-    // Chainlink aggregator can represent.
-    int256 ceiling = refPrice + (refPrice * int256(uint256(BAND_BPS))) / int256(BPS);
+    // refPrice is positive and BAND_BPS <= 10_000, so neither bound can overflow for any answer a
+    // Chainlink aggregator can represent, and the floor cannot go negative.
+    int256 delta = (refPrice * int256(uint256(BAND_BPS))) / int256(BPS);
+    int256 ceiling = refPrice + delta;
+    int256 floor = refPrice - delta;
     if (answer > ceiling) answer = ceiling;
+    else if (answer < floor) answer = floor;
 
     return (roundId, answer, startedAt, updatedAt, raw);
   }

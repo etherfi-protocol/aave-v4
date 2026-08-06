@@ -155,12 +155,51 @@ contract ChainlinkPriceBandAdapterTest is Test {
     assertFalse(adapter.isCapped());
   }
 
-  /// @dev The whole point of upward-only: a real crash must reach the oracle immediately, or
-  ///      liquidations stop being economically correct and the shortfall lands on suppliers.
-  function test_fall_passesThroughUnclamped() public {
-    feed.push(10e8, 3000); // -90%
-    assertEq(adapter.latestAnswer(), 10e8);
+  function test_belowBand_clampsToFloor() public {
+    feed.push(10e8, 3000); // -90% against a 20% band
+    assertEq(adapter.latestAnswer(), 80e8, 'clamped to previous - 20%');
+    assertTrue(adapter.isCapped());
+    assertEq(adapter.rawAnswer(), 10e8, 'raw still visible');
+  }
+
+  function test_exactlyAtFloor_doesNotClamp() public {
+    feed.push(80e8, 3000);
+    assertEq(adapter.latestAnswer(), 80e8);
     assertFalse(adapter.isCapped());
+  }
+
+  /// @dev The property that makes a floor safe rather than a way to hide insolvency: the reference
+  ///      is the FEED's own previous round, never this adapter's clamped output, so a genuine crash
+  ///      is delayed by a bounded number of rounds and then fully reflected. Without this the floor
+  ///      would ratchet down 20% at a time forever and keep collateral permanently overpriced.
+  function test_realCrash_convergesInTwoRounds() public {
+    feed.push(50e8, 3000); // feed crashes 100 -> 50
+    assertEq(adapter.latestAnswer(), 80e8, 'round 1: one band behind');
+    assertTrue(adapter.isCapped());
+
+    feed.push(50e8, 4000); // feed holds at 50
+    assertEq(adapter.latestAnswer(), 50e8, 'round 2: caught up to the real price');
+    assertFalse(adapter.isCapped(), 'and no longer clamping');
+  }
+
+  /// @dev THE LIMITATION, asserted so it is documented rather than assumed. The band bounds a
+  ///      *single round*. A feed that walks down one band per round is never clamped at all, so a
+  ///      patient attacker in control of the feed still reaches any price - it just takes
+  ///      ceil(move / BAND_BPS) rounds instead of one. The band buys detection time; it is not a
+  ///      substitute for monitoring the feed itself.
+  function test_gradualWalkDown_isNeverClamped() public {
+    int256 price = 100e8;
+    for (uint256 i = 0; i < 5; ++i) {
+      price = price - (price * 2000) / 10_000; // exactly one band down each round
+      feed.push(price, 3000 + i * 1000);
+      assertEq(
+        adapter.latestAnswer(),
+        price,
+        'a one-band step is inside the band, so never clamped'
+      );
+      assertFalse(adapter.isCapped());
+    }
+    assertLt(price, 33e8, 'reached -67% across five rounds without ever tripping the band');
   }
 
   function test_reference_isPreviousRound() public {
@@ -249,11 +288,15 @@ contract ChainlinkPriceBandAdapterTest is Test {
     feed.push(next, 3000);
 
     int256 reported = a.latestAnswer();
-    int256 ceiling = 100e8 + (100e8 * int256(uint256(bandBps))) / 10_000;
+    int256 delta = (100e8 * int256(uint256(bandBps))) / 10_000;
+    int256 ceiling = 100e8 + delta;
+    int256 floorPrice = 100e8 - delta;
 
     assertLe(reported, ceiling, 'never above the ceiling');
-    assertLe(reported, next, 'never above what the feed said');
-    if (next <= ceiling) assertEq(reported, next, 'untouched when inside the band');
+    assertGe(reported, floorPrice, 'never below the floor');
+    if (next > ceiling) assertEq(reported, ceiling, 'clamped up');
+    else if (next < floorPrice) assertEq(reported, floorPrice, 'clamped down');
+    else assertEq(reported, next, 'untouched when inside the band');
     assertGt(reported, 0, 'never reports a non-positive price');
   }
 }
@@ -297,6 +340,30 @@ contract ChainlinkPriceBandAdapterForkTest is Test {
   function test_fork_paxg() public {
     if (!_fork()) return;
     _check(PAXG_USD_OP, 2000, 'PAXG / USD');
+  }
+
+  /// @dev The downward half, on a live feed: a manipulated crash to near zero must be floored, so
+  ///      healthy positions are not liquidated on a price that never existed.
+  function test_fork_clampsAnInjectedCrash() public {
+    if (!_fork()) return;
+    ChainlinkPriceBandAdapter a = new ChainlinkPriceBandAdapter(
+      IChainlinkAggregator(SPY_USD_OP),
+      2000,
+      'Banded SPY'
+    );
+
+    int256 refPrice = a.referenceAnswer();
+    (uint80 roundId, , uint256 startedAt, uint256 updatedAt, ) = IChainlinkAggregator(SPY_USD_OP)
+      .latestRoundData();
+
+    vm.mockCall(
+      SPY_USD_OP,
+      abi.encodeWithSelector(IChainlinkAggregator.latestRoundData.selector),
+      abi.encode(roundId, int256(1), startedAt, updatedAt, roundId)
+    );
+
+    assertTrue(a.isCapped(), 'a crash to 1 wei must be clamped');
+    assertEq(a.latestAnswer(), refPrice - (refPrice * 2000) / 10_000, 'floored at reference - 20%');
   }
 
   /// @dev The band must bind on a live feed when the feed itself prints something absurd.
