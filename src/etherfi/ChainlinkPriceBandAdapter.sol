@@ -65,6 +65,28 @@ import {
 ///      triaging a clamp realistically takes - an hour is a reasonable default for an alert that
 ///      pages a human - not to the feed's heartbeat.
 ///
+/// @dev THE REFERENCE IS ANCHORED IN TIME, NOT IN ROUND INDEX
+///      Bounding a round against its immediate predecessor bounds nothing when rounds are cheap.
+///      Compounding at 20% a round, four rounds halve a price and thirteen produce a ten-fold move,
+///      with every single step passing the check. This is not hypothetical: the live PAXG feed on
+///      Optimism has published three rounds inside one block, and its minimum observed gap between
+///      rounds is zero seconds.
+///
+///      So the reference is the newest round at least `REFERENCE_AGE` old. A burst of rounds all
+///      measure against the same anchor, and the total move is bounded by one band per
+///      `REFERENCE_AGE` no matter how many rounds are posted. The guarantee changes from "20% per
+///      round", which is meaningless when rounds are free, to "20% per hour", which is not.
+///
+///      Sized against measurement: the worst one-hour move in the full history of these feeds is
+///      7.50% for PAXG and 1.54% for SPY, both comfortably inside a 2000 bps band, so a one-hour
+///      anchor never binds on honest movement.
+///
+///      The residual, stated plainly: a `view` function has to bound its lookback for gas, so an
+///      attacker who floods more than `MAX_LOOKBACK` rounds inside the window falls back to the
+///      oldest reachable round and escapes at one band per `MAX_LOOKBACK` rounds. Closing that
+///      completely needs stored state, which this cannot have. `referenceIsAnchored()` reports when
+///      the fallback is in use.
+///
 /// @dev THE BAND WIDENS WITH THE AGE OF THE ROUND
 ///      A fixed band has a failure mode that only shows up when a big move is followed by a quiet
 ///      market. The clamp holds, the price stops moving, so the feed's deviation trigger never fires
@@ -117,6 +139,19 @@ contract ChainlinkPriceBandAdapter is IChainlinkPriceBandAdapter {
   ///      At 100x the band nothing meaningful is being clamped anyway.
   uint256 internal constant MAX_EFFECTIVE_BAND_BPS = 1_000_000;
 
+  /// @notice Shortest permitted reference age.
+  uint32 public constant MIN_REFERENCE_AGE = 5 minutes;
+
+  /// @notice Longest permitted reference age. Beyond this the reference predates a full heartbeat
+  ///         on these feeds and the band would start binding on ordinary movement.
+  uint32 public constant MAX_REFERENCE_AGE = 12 hours;
+
+  /// @notice How many rounds back the search for an anchor will walk before giving up.
+  /// @dev Every step is a staticcall, so this is a gas bound as much as a security one. The normal
+  ///      case exits on the first step, because these feeds publish far less often than the anchor
+  ///      window. Only a burst walks further.
+  uint256 public constant MAX_LOOKBACK = 16;
+
   /// @inheritdoc IChainlinkPriceBandAdapter
   IChainlinkAggregator public immutable FEED;
 
@@ -125,6 +160,9 @@ contract ChainlinkPriceBandAdapter is IChainlinkPriceBandAdapter {
 
   /// @inheritdoc IChainlinkPriceBandAdapter
   uint32 public immutable WIDEN_PERIOD;
+
+  /// @inheritdoc IChainlinkPriceBandAdapter
+  uint32 public immutable REFERENCE_AGE;
 
   /// @inheritdoc IChainlinkAggregator
   uint8 public immutable decimals;
@@ -138,10 +176,13 @@ contract ChainlinkPriceBandAdapter is IChainlinkPriceBandAdapter {
   ///        how long triaging a clamp actually takes: it is the deadline on acting before the clamp
   ///        starts releasing.
   /// @param adapterDescription Human-readable description for this adapter.
+  /// @param referenceAge How far back the reference round must sit, in seconds. This is the unit
+  ///        the band is denominated in: at 2000 bps and one hour, the bound is 20% per hour.
   constructor(
     IChainlinkAggregator feed,
     uint16 bandBps,
     uint32 widenPeriod,
+    uint32 referenceAge,
     string memory adapterDescription
   ) {
     if (address(feed) == address(0)) revert FeedIsZeroAddress();
@@ -149,10 +190,14 @@ contract ChainlinkPriceBandAdapter is IChainlinkPriceBandAdapter {
     if (widenPeriod < MIN_WIDEN_PERIOD || widenPeriod > MAX_WIDEN_PERIOD) {
       revert InvalidWidenPeriod(widenPeriod);
     }
+    if (referenceAge < MIN_REFERENCE_AGE || referenceAge > MAX_REFERENCE_AGE) {
+      revert InvalidReferenceAge(referenceAge);
+    }
 
     FEED = feed;
     BAND_BPS = bandBps;
     WIDEN_PERIOD = widenPeriod;
+    REFERENCE_AGE = referenceAge;
     decimals = feed.decimals();
     _description = adapterDescription;
   }
@@ -213,14 +258,20 @@ contract ChainlinkPriceBandAdapter is IChainlinkPriceBandAdapter {
 
   /// @inheritdoc IChainlinkPriceBandAdapter
   function referenceAnswer() external view returns (int256) {
-    (int256 refPrice, ) = _reference();
+    (int256 refPrice, , ) = _reference();
     return refPrice;
   }
 
   /// @inheritdoc IChainlinkPriceBandAdapter
   function hasReference() external view returns (bool) {
-    (, bool available) = _reference();
+    (, bool available, ) = _reference();
     return available;
+  }
+
+  /// @inheritdoc IChainlinkPriceBandAdapter
+  function referenceIsAnchored() external view returns (bool) {
+    (, , bool anchored) = _reference();
+    return anchored;
   }
 
   /// @inheritdoc IChainlinkPriceBandAdapter
@@ -244,7 +295,7 @@ contract ChainlinkPriceBandAdapter is IChainlinkPriceBandAdapter {
     if (raw <= 0) revert InvalidPrice();
 
     answer = raw;
-    (int256 refPrice, bool available) = _reference();
+    (int256 refPrice, bool available, ) = _reference();
     if (!available) return (roundId, answer, startedAt, updatedAt, raw);
 
     uint256 eff = _effectiveBandBps(updatedAt);
@@ -284,38 +335,51 @@ contract ChainlinkPriceBandAdapter is IChainlinkPriceBandAdapter {
     return eff > MAX_EFFECTIVE_BAND_BPS ? MAX_EFFECTIVE_BAND_BPS : eff;
   }
 
-  /// @dev The previous round's answer, within the same aggregator phase.
+  /// @dev The newest round that is at least `REFERENCE_AGE` old, within the same aggregator phase.
+  ///
+  ///      Walking back in TIME rather than taking `latestRound - 1` is what makes the band a bound
+  ///      per hour instead of per round. A burst of rounds inside the window all resolve to the same
+  ///      anchor, so posting more rounds buys no further movement.
   ///
   ///      A Chainlink proxy round id packs `phaseId` in the high 16 bits and the aggregator's own
-  ///      round in the low 64. Decrementing across a phase boundary reads a round that belongs to a
-  ///      different aggregator, and in practice returns zero - `phase 2, round 0` on the live OP
-  ///      SPY feed answers 0. So the phase is preserved and the first round of a phase is treated
-  ///      as having no reference rather than banding against a bogus value.
+  ///      round in the low 64. Decrementing across a phase boundary reads a different aggregator and
+  ///      in practice answers zero - `phase 2, round 0` on the live OP SPY feed does exactly that.
+  ///      So the phase is fixed for the whole walk, and the start of a phase ends it.
   ///
-  ///      Fails open: with no reference the raw answer passes through. That is the deliberate
-  ///      choice over reverting, because a revert on a collateral price takes every action on the
-  ///      reserve with it, including liquidation. `hasReference()` exposes the condition so it can
-  ///      be alerted on instead.
-  function _reference() internal view returns (int256 answer, bool available) {
+  ///      Fails open: with no usable round the raw answer passes through, rather than reverting. A
+  ///      revert on a collateral price takes every action on the reserve with it, liquidation
+  ///      included. `hasReference()` and `referenceIsAnchored()` expose both degraded states.
+  function _reference() internal view returns (int256 answer, bool available, bool anchored) {
     uint256 latest = FEED.latestRound();
-    uint64 aggregatorRound = uint64(latest);
-    if (aggregatorRound <= 1) return (0, false);
+    uint64 round = uint64(latest);
+    if (round <= 1) return (0, false, false);
 
-    uint80 previousId = uint80(
-      (uint256(uint16(latest >> 64)) << 64) | uint256(aggregatorRound - 1)
-    );
+    uint256 phase = uint256(uint16(latest >> 64)) << 64;
+    uint256 cutoff = block.timestamp > REFERENCE_AGE ? block.timestamp - REFERENCE_AGE : 0;
 
-    try FEED.getRoundData(previousId) returns (
-      uint80,
-      int256 previous,
-      uint256,
-      uint256 previousUpdatedAt,
-      uint80
-    ) {
-      if (previous <= 0 || previousUpdatedAt == 0) return (0, false);
-      return (previous, true);
-    } catch {
-      return (0, false);
+    for (uint256 i = 0; i < MAX_LOOKBACK; ++i) {
+      round -= 1;
+      try FEED.getRoundData(uint80(phase | uint256(round))) returns (
+        uint80,
+        int256 previous,
+        uint256,
+        uint256 previousUpdatedAt,
+        uint80
+      ) {
+        // A hole in history ends the walk; keep whatever was already reached.
+        if (previous <= 0 || previousUpdatedAt == 0) break;
+        answer = previous;
+        available = true;
+        if (previousUpdatedAt <= cutoff) return (answer, true, true);
+      } catch {
+        break;
+      }
+      if (round <= 1) break;
     }
+
+    // The lookback ran out or the phase began. Whatever was reached is the furthest back available
+    // and therefore the most conservative reference on offer, but it is NOT anchored in time and
+    // callers are told so.
+    return (answer, available, false);
   }
 }

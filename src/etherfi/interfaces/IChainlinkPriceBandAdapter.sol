@@ -53,6 +53,8 @@ interface IChainlinkPriceBandAdapter is IChainlinkAggregator {
   error InvalidBand(uint16 bandBps);
   /// @notice Thrown when the widen period is outside [MIN_WIDEN_PERIOD, MAX_WIDEN_PERIOD].
   error InvalidWidenPeriod(uint32 widenPeriod);
+  /// @notice Thrown when the reference age is outside [MIN_REFERENCE_AGE, MAX_REFERENCE_AGE].
+  error InvalidReferenceAge(uint32 referenceAge);
 
   /// @notice The wrapped Chainlink feed.
   function FEED() external view returns (IChainlinkAggregator);
@@ -70,6 +72,18 @@ interface IChainlinkPriceBandAdapter is IChainlinkAggregator {
 
   /// @notice Seconds since the latest round was published.
   function roundAge() external view returns (uint256);
+
+  /// @notice How far back in time the reference round must sit, in seconds.
+  /// @dev This is what makes the band a bound per unit of TIME rather than per round. Without it,
+  ///      anyone able to produce rounds can post several in one block, each inside the band against
+  ///      its immediate predecessor, and walk the price anywhere.
+  function REFERENCE_AGE() external view returns (uint32);
+
+  /// @notice Whether the reference actually met `REFERENCE_AGE`.
+  /// @dev False means the lookback was exhausted before finding a round that old, so the oldest
+  ///      reachable round was used instead. In normal operation this is always true; false is the
+  ///      signature of an unusual burst of rounds and is worth alerting on.
+  function referenceIsAnchored() external view returns (bool);
 
   /// @notice The feed's unmodified latest answer, before the band is applied.
   function rawAnswer() external view returns (int256);
