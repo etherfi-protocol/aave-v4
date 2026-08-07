@@ -51,12 +51,25 @@ interface IChainlinkPriceBandAdapter is IChainlinkAggregator {
   error FeedIsZeroAddress();
   /// @notice Thrown when the configured band is outside [MIN_BAND_BPS, MAX_BAND_BPS].
   error InvalidBand(uint16 bandBps);
+  /// @notice Thrown when the widen period is outside [MIN_WIDEN_PERIOD, MAX_WIDEN_PERIOD].
+  error InvalidWidenPeriod(uint32 widenPeriod);
 
   /// @notice The wrapped Chainlink feed.
   function FEED() external view returns (IChainlinkAggregator);
 
-  /// @notice Maximum permitted rise over the previous round, in basis points.
+  /// @notice Base band, in basis points, applied to a freshly published round.
   function BAND_BPS() external view returns (uint16);
+
+  /// @notice Seconds of round age that add one further `BAND_BPS` to the band.
+  /// @dev The band widens linearly with the age of the latest round, so a clamp decays instead of
+  ///      holding until the feed happens to publish again.
+  function WIDEN_PERIOD() external view returns (uint32);
+
+  /// @notice The band actually in force right now, in basis points, given the latest round's age.
+  function effectiveBandBps() external view returns (uint256);
+
+  /// @notice Seconds since the latest round was published.
+  function roundAge() external view returns (uint256);
 
   /// @notice The feed's unmodified latest answer, before the band is applied.
   function rawAnswer() external view returns (int256);

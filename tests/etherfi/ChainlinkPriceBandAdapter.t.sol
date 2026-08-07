@@ -85,6 +85,7 @@ contract MockAggregator is IChainlinkAggregator {
 
 contract ChainlinkPriceBandAdapterTest is Test {
   uint16 internal constant BAND = 2000; // 20%, the equity Level 3 halt
+  uint32 internal constant WIDEN = 1 hours;
 
   MockAggregator internal feed;
   ChainlinkPriceBandAdapter internal adapter;
@@ -93,7 +94,7 @@ contract ChainlinkPriceBandAdapterTest is Test {
     feed = new MockAggregator(8, 'MOCK / USD');
     feed.push(100e8, 1000);
     feed.push(100e8, 2000);
-    adapter = new ChainlinkPriceBandAdapter(feed, BAND, 'Banded MOCK / USD');
+    adapter = new ChainlinkPriceBandAdapter(feed, BAND, WIDEN, 'Banded MOCK / USD');
   }
 
   // --- construction ---------------------------------------------------------------------------
@@ -107,7 +108,7 @@ contract ChainlinkPriceBandAdapterTest is Test {
 
   function test_constructor_revertsOnZeroFeed() public {
     vm.expectRevert(IChainlinkPriceBandAdapter.FeedIsZeroAddress.selector);
-    new ChainlinkPriceBandAdapter(IChainlinkAggregator(address(0)), BAND, 'x');
+    new ChainlinkPriceBandAdapter(IChainlinkAggregator(address(0)), BAND, WIDEN, 'x');
   }
 
   function test_constructor_revertsOnBandTooTight() public {
@@ -115,7 +116,7 @@ contract ChainlinkPriceBandAdapterTest is Test {
     vm.expectRevert(
       abi.encodeWithSelector(IChainlinkPriceBandAdapter.InvalidBand.selector, tooTight)
     );
-    new ChainlinkPriceBandAdapter(feed, tooTight, 'x');
+    new ChainlinkPriceBandAdapter(feed, tooTight, WIDEN, 'x');
   }
 
   function test_constructor_revertsOnBandTooLoose() public {
@@ -123,14 +124,14 @@ contract ChainlinkPriceBandAdapterTest is Test {
     vm.expectRevert(
       abi.encodeWithSelector(IChainlinkPriceBandAdapter.InvalidBand.selector, tooLoose)
     );
-    new ChainlinkPriceBandAdapter(feed, tooLoose, 'x');
+    new ChainlinkPriceBandAdapter(feed, tooLoose, WIDEN, 'x');
   }
 
   function test_constructor_revertsOnZeroBand() public {
     vm.expectRevert(
       abi.encodeWithSelector(IChainlinkPriceBandAdapter.InvalidBand.selector, uint16(0))
     );
-    new ChainlinkPriceBandAdapter(feed, 0, 'x');
+    new ChainlinkPriceBandAdapter(feed, 0, WIDEN, 'x');
   }
 
   // --- the band ------------------------------------------------------------------------------
@@ -278,14 +279,108 @@ contract ChainlinkPriceBandAdapterTest is Test {
     assertEq(adapter.latestAnswer(), 1000e8);
   }
 
+  // --- the band widens with round age ---
+
+  function test_widen_bandIsExactlyBandBpsOnAFreshRound() public {
+    feed.push(101e8, block.timestamp);
+    assertEq(adapter.roundAge(), 0);
+    assertEq(adapter.effectiveBandBps(), BAND);
+  }
+
+  function test_widen_growsOneBandPerPeriod() public {
+    feed.push(101e8, block.timestamp);
+    assertEq(adapter.effectiveBandBps(), BAND, 'age 0 -> 1x');
+    vm.warp(block.timestamp + WIDEN);
+    assertEq(adapter.effectiveBandBps(), uint256(BAND) * 2, 'age 1 period -> 2x');
+    vm.warp(block.timestamp + WIDEN * 3);
+    assertEq(adapter.effectiveBandBps(), uint256(BAND) * 5, 'age 4 periods -> 5x');
+  }
+
+  /// @dev The case a fixed band handles badly: a big move, then a quiet market. The deviation
+  ///      trigger never fires again, so without widening the clamp would hold until the heartbeat.
+  function test_widen_clampReleasesWhileTheFeedStaysSilent() public {
+    uint256 t = block.timestamp;
+    feed.push(200e8, t); // +100% against a 20% band, and no further rounds will arrive
+
+    assertTrue(adapter.isCapped());
+    assertEq(adapter.latestAnswer(), 120e8, 'on arrival: clamped at one band');
+
+    vm.warp(t + WIDEN);
+    assertEq(adapter.latestAnswer(), 140e8, 'after one period: two bands');
+    assertTrue(adapter.isCapped());
+
+    vm.warp(t + WIDEN * 4);
+    assertEq(adapter.latestAnswer(), 200e8, 'after four periods the raw value is inside the band');
+    assertFalse(adapter.isCapped(), 'and the clamp has released with no new round at all');
+  }
+
+  function test_widen_floorReleasesToo() public {
+    uint256 t = block.timestamp;
+    feed.push(10e8, t); // -90%
+    assertEq(adapter.latestAnswer(), 80e8, 'floored at one band');
+    vm.warp(t + WIDEN * 4);
+    assertEq(adapter.latestAnswer(), 10e8, 'released downward as well');
+    assertFalse(adapter.isCapped());
+  }
+
+  /// @dev Once the widened band reaches 100% the floor would be non-positive. It must degrade to
+  ///      "no lower bound" rather than ever reporting zero or negative.
+  function test_widen_neverReportsNonPositiveWhenTheFloorWouldGoNegative() public {
+    uint256 t = block.timestamp;
+    feed.push(1, t); // one wei, far below any floor
+    vm.warp(t + WIDEN * 100); // band far past 100%
+    assertGt(adapter.effectiveBandBps(), 10_000);
+    assertEq(adapter.latestAnswer(), 1, 'raw passes through');
+    assertGt(adapter.latestAnswer(), 0);
+  }
+
+  function test_widen_isCappedAtTheCeilingForADeadFeed() public {
+    feed.push(150e8, block.timestamp);
+    vm.warp(block.timestamp + 3650 days);
+    assertEq(adapter.effectiveBandBps(), 1_000_000, 'capped so the delta cannot overflow');
+    assertEq(adapter.latestAnswer(), 150e8);
+  }
+
+  /// @dev Why a short widen period is safe even on a feed that normally goes 24h between rounds:
+  ///      widening only ever matters when something is being clamped. An answer already inside the
+  ///      base band is inside every wider band too, so an aged round with no clamp is unaffected -
+  ///      and every genuinely new round arrives at age zero with the band at full strength.
+  function test_widen_isANoOpWhenNothingIsClamped() public {
+    uint256 t = block.timestamp;
+    feed.push(105e8, t); // +5%, comfortably inside a 20% band
+    assertEq(adapter.latestAnswer(), 105e8);
+    assertFalse(adapter.isCapped());
+
+    vm.warp(t + WIDEN * 100); // band now enormous
+    assertGt(adapter.effectiveBandBps(), 10_000);
+    assertEq(adapter.latestAnswer(), 105e8, 'unchanged: widening only releases a clamp');
+    assertFalse(adapter.isCapped());
+  }
+
+  function test_constructor_revertsOnWidenPeriodTooShort() public {
+    uint32 tooShort = adapter.MIN_WIDEN_PERIOD() - 1;
+    vm.expectRevert(
+      abi.encodeWithSelector(IChainlinkPriceBandAdapter.InvalidWidenPeriod.selector, tooShort)
+    );
+    new ChainlinkPriceBandAdapter(feed, BAND, tooShort, 'x');
+  }
+
+  function test_constructor_revertsOnWidenPeriodTooLong() public {
+    uint32 tooLong = adapter.MAX_WIDEN_PERIOD() + 1;
+    vm.expectRevert(
+      abi.encodeWithSelector(IChainlinkPriceBandAdapter.InvalidWidenPeriod.selector, tooLong)
+    );
+    new ChainlinkPriceBandAdapter(feed, BAND, tooLong, 'x');
+  }
+
   // --- fuzz ------------------------------------------------------------------------------------
 
   function testFuzz_neverExceedsCeilingAndNeverRaisesAFall(int256 next, uint16 bandBps) public {
     next = bound(next, 1, int256(1e18));
     bandBps = uint16(bound(bandBps, adapter.MIN_BAND_BPS(), adapter.MAX_BAND_BPS()));
 
-    ChainlinkPriceBandAdapter a = new ChainlinkPriceBandAdapter(feed, bandBps, 'fuzz');
-    feed.push(next, 3000);
+    ChainlinkPriceBandAdapter a = new ChainlinkPriceBandAdapter(feed, bandBps, WIDEN, 'fuzz');
+    feed.push(next, block.timestamp); // age 0, so the base band is what is under test
 
     int256 reported = a.latestAnswer();
     int256 delta = (100e8 * int256(uint256(bandBps))) / 10_000;
@@ -318,6 +413,7 @@ contract ChainlinkPriceBandAdapterForkTest is Test {
     ChainlinkPriceBandAdapter a = new ChainlinkPriceBandAdapter(
       IChainlinkAggregator(feed),
       band,
+      1 hours,
       string.concat('Banded ', label)
     );
 
@@ -349,6 +445,7 @@ contract ChainlinkPriceBandAdapterForkTest is Test {
     ChainlinkPriceBandAdapter a = new ChainlinkPriceBandAdapter(
       IChainlinkAggregator(SPY_USD_OP),
       2000,
+      1 hours,
       'Banded SPY'
     );
 
@@ -359,11 +456,16 @@ contract ChainlinkPriceBandAdapterForkTest is Test {
     vm.mockCall(
       SPY_USD_OP,
       abi.encodeWithSelector(IChainlinkAggregator.latestRoundData.selector),
-      abi.encode(roundId, int256(1), startedAt, updatedAt, roundId)
+      abi.encode(roundId, int256(1), startedAt, block.timestamp, roundId)
     );
 
     assertTrue(a.isCapped(), 'a crash to 1 wei must be clamped');
-    assertEq(a.latestAnswer(), refPrice - (refPrice * 2000) / 10_000, 'floored at reference - 20%');
+    int256 effD = int256(a.effectiveBandBps());
+    assertEq(
+      a.latestAnswer(),
+      refPrice - (refPrice * effD) / 10_000,
+      'floored at reference - one effective band'
+    );
   }
 
   /// @dev The band must bind on a live feed when the feed itself prints something absurd.
@@ -372,6 +474,7 @@ contract ChainlinkPriceBandAdapterForkTest is Test {
     ChainlinkPriceBandAdapter a = new ChainlinkPriceBandAdapter(
       IChainlinkAggregator(SPY_USD_OP),
       2000,
+      1 hours,
       'Banded SPY'
     );
 
@@ -382,10 +485,15 @@ contract ChainlinkPriceBandAdapterForkTest is Test {
     vm.mockCall(
       SPY_USD_OP,
       abi.encodeWithSelector(IChainlinkAggregator.latestRoundData.selector),
-      abi.encode(roundId, refPrice * 10, startedAt, updatedAt, roundId)
+      abi.encode(roundId, refPrice * 10, startedAt, block.timestamp, roundId)
     );
 
     assertTrue(a.isCapped(), 'a 10x print must be clamped');
-    assertEq(a.latestAnswer(), refPrice + (refPrice * 2000) / 10_000, 'clamped to reference + 20%');
+    int256 eff = int256(a.effectiveBandBps());
+    assertEq(
+      a.latestAnswer(),
+      refPrice + (refPrice * eff) / 10_000,
+      'clamped to reference + one effective band'
+    );
   }
 }

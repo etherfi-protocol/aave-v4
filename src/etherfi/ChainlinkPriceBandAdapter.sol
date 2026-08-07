@@ -61,6 +61,31 @@ import {
 ///      needs ceil(X / BAND_BPS) rounds to be fully reflected. At 2000 bps a 40% crash is one round
 ///      behind; at 100 bps it would be nineteen, which is why the floor on BAND_BPS is not 100.
 ///
+///      WIDEN_PERIOD is the second dial and bounds that in wall-clock time. Size it to how long
+///      triaging a clamp realistically takes - an hour is a reasonable default for an alert that
+///      pages a human - not to the feed's heartbeat.
+///
+/// @dev THE BAND WIDENS WITH THE AGE OF THE ROUND
+///      A fixed band has a failure mode that only shows up when a big move is followed by a quiet
+///      market. The clamp holds, the price stops moving, so the feed's deviation trigger never fires
+///      again, and the remaining move is not reported until the heartbeat elapses - up to 24h on
+///      these feeds. Clamped upward that under-prices collateral; clamped downward it over-prices
+///      it, and liquidations that should fire do not.
+///
+///      So the band grows linearly with how long the current round has been the latest:
+///
+///        effectiveBand = BAND_BPS * (1 + age / WIDEN_PERIOD)
+///
+///      A clamp is then a decaying speed bump rather than a wall. It is full strength on arrival,
+///      when a bad print is most likely to be acted on by a liquidator, and releases over the
+///      following hours if the feed keeps insisting.
+///
+///      Read the trade honestly: this WEAKENS protection against a sustained manipulation, because a
+///      value the attacker holds flat is accepted in hours rather than at the next heartbeat. The
+///      protection was always bounded at one round; widening bounds it in wall-clock time too. It is
+///      the right trade only if a clamp is actually alerted on and acted upon - `isCapped()` is an
+///      alert with a deadline, and WIDEN_PERIOD sets that deadline.
+///
 /// @dev STATELESS BY CONSTRUCTION
 ///      The reference is the feed's own previous round, read through `getRoundData`, so there is no
 ///      snapshot, no keeper, and no re-snapshot cadence for anyone to own and forget. The cost is
@@ -80,11 +105,26 @@ contract ChainlinkPriceBandAdapter is IChainlinkPriceBandAdapter {
   /// @notice Loosest permitted band. A band at or above 100% cannot bind on any rise.
   uint16 public constant MAX_BAND_BPS = 10_000;
 
+  /// @notice Tightest permitted widen period. Shorter than this and the band releases before anyone
+  ///         could plausibly triage a clamp.
+  uint32 public constant MIN_WIDEN_PERIOD = 15 minutes;
+
+  /// @notice Longest permitted widen period. Beyond this the widening does not meaningfully bound
+  ///         the mispricing window, which is the whole reason it exists.
+  uint32 public constant MAX_WIDEN_PERIOD = 2 days;
+
+  /// @dev Ceiling on the widened band, so a feed that dies does not overflow the delta arithmetic.
+  ///      At 100x the band nothing meaningful is being clamped anyway.
+  uint256 internal constant MAX_EFFECTIVE_BAND_BPS = 1_000_000;
+
   /// @inheritdoc IChainlinkPriceBandAdapter
   IChainlinkAggregator public immutable FEED;
 
   /// @inheritdoc IChainlinkPriceBandAdapter
   uint16 public immutable BAND_BPS;
+
+  /// @inheritdoc IChainlinkPriceBandAdapter
+  uint32 public immutable WIDEN_PERIOD;
 
   /// @inheritdoc IChainlinkAggregator
   uint8 public immutable decimals;
@@ -93,14 +133,26 @@ contract ChainlinkPriceBandAdapter is IChainlinkPriceBandAdapter {
 
   /// @param feed The Chainlink feed to wrap. Must expose `getRoundData`, which is what makes the
   ///        previous-round reference possible.
-  /// @param bandBps Maximum permitted rise over the previous round, in basis points.
+  /// @param bandBps Band applied to a freshly published round, in basis points.
+  /// @param widenPeriod Seconds of round age that add one further `bandBps` to the band. Size it to
+  ///        how long triaging a clamp actually takes: it is the deadline on acting before the clamp
+  ///        starts releasing.
   /// @param adapterDescription Human-readable description for this adapter.
-  constructor(IChainlinkAggregator feed, uint16 bandBps, string memory adapterDescription) {
+  constructor(
+    IChainlinkAggregator feed,
+    uint16 bandBps,
+    uint32 widenPeriod,
+    string memory adapterDescription
+  ) {
     if (address(feed) == address(0)) revert FeedIsZeroAddress();
     if (bandBps < MIN_BAND_BPS || bandBps > MAX_BAND_BPS) revert InvalidBand(bandBps);
+    if (widenPeriod < MIN_WIDEN_PERIOD || widenPeriod > MAX_WIDEN_PERIOD) {
+      revert InvalidWidenPeriod(widenPeriod);
+    }
 
     FEED = feed;
     BAND_BPS = bandBps;
+    WIDEN_PERIOD = widenPeriod;
     decimals = feed.decimals();
     _description = adapterDescription;
   }
@@ -195,15 +247,41 @@ contract ChainlinkPriceBandAdapter is IChainlinkPriceBandAdapter {
     (int256 refPrice, bool available) = _reference();
     if (!available) return (roundId, answer, startedAt, updatedAt, raw);
 
-    // refPrice is positive and BAND_BPS <= 10_000, so neither bound can overflow for any answer a
-    // Chainlink aggregator can represent, and the floor cannot go negative.
-    int256 delta = (refPrice * int256(uint256(BAND_BPS))) / int256(BPS);
+    uint256 eff = _effectiveBandBps(updatedAt);
+    // refPrice is positive and eff is capped at MAX_EFFECTIVE_BAND_BPS, so the delta cannot overflow
+    // for any answer a Chainlink aggregator can represent.
+    int256 delta = (refPrice * int256(eff)) / int256(BPS);
     int256 ceiling = refPrice + delta;
-    int256 floor = refPrice - delta;
+    // Once the widened band reaches 100% the floor would be non-positive, which is simply no lower
+    // bound at all. Report it as 1 wei so the invariant "never returns a non-positive price" holds
+    // without the floor doing any work.
+    int256 floor = eff >= BPS ? int256(1) : refPrice - delta;
     if (answer > ceiling) answer = ceiling;
     else if (answer < floor) answer = floor;
 
     return (roundId, answer, startedAt, updatedAt, raw);
+  }
+
+  /// @inheritdoc IChainlinkPriceBandAdapter
+  function effectiveBandBps() external view returns (uint256) {
+    (, , , uint256 updatedAt, ) = FEED.latestRoundData();
+    return _effectiveBandBps(updatedAt);
+  }
+
+  /// @inheritdoc IChainlinkPriceBandAdapter
+  function roundAge() external view returns (uint256) {
+    (, , , uint256 updatedAt, ) = FEED.latestRoundData();
+    return block.timestamp > updatedAt ? block.timestamp - updatedAt : 0;
+  }
+
+  /// @dev `BAND_BPS * (1 + age / WIDEN_PERIOD)`, so the band is exactly `BAND_BPS` on a freshly
+  ///      published round and gains another `BAND_BPS` for every `WIDEN_PERIOD` it goes unrefreshed.
+  ///      A round timestamped in the future (clock skew between the feed and this chain) reads as
+  ///      age zero rather than underflowing.
+  function _effectiveBandBps(uint256 updatedAt) internal view returns (uint256) {
+    uint256 age = block.timestamp > updatedAt ? block.timestamp - updatedAt : 0;
+    uint256 eff = uint256(BAND_BPS) + (uint256(BAND_BPS) * age) / WIDEN_PERIOD;
+    return eff > MAX_EFFECTIVE_BAND_BPS ? MAX_EFFECTIVE_BAND_BPS : eff;
   }
 
   /// @dev The previous round's answer, within the same aggregator phase.
