@@ -1,0 +1,177 @@
+{
+  "chainId": 10,
+  "network": "optimism",
+  "instance": "etherfi-cash",
+  "description": "ether.fi Cash Aave V4 whitelabel instance — deployed and administered by ether.fi",
+  "status": "live",
+  "deployedAt": "2026-07-30",
+  "salt": "0xf74ad75659c1f58e8b093c24f4bf439b7961aaaa19e6abc1bc12d2e55d745319",
+  "core": {
+    "accessManager": "0x188d7173772499FB6375F23FdFd130CE6107286b",
+    "configEngine": "0x84210b3087E952Be0f3610fD75f0f045995eAF22",
+    "liquidationLogic": "0x88dF535473C5adf1f57789734A05E555F7Deb8DB",
+    "hubConfigurator": "0xA39bEf2fD611fb9c5a69D63277b4Af97a30F0dbC",
+    "spokeConfigurator": "0xFEe9E8cCE1c40D3bd9F025437D3A11cA0DAe9f8b",
+    "nativeTokenGateway": "0xB53A2a51f6Ed4B15B7822De4aB678E5Fe554A5Ae"
+  },
+  "hubs": {
+    "CASH_HUB": {
+      "proxy": "0x66753c4e3fC84f1eD0e3C267C927284E9d90C572",
+      "implementation": "0x697aF34263Bc8E5E6B0e6b0C37A1EC58CeDE2cE9",
+      "irStrategy": "0x51d07C362f9c4716F96EbEB63DB985EF9D2aCd7C"
+    }
+  },
+  "spokes": {
+    "CASH_SPOKE": {
+      "proxy": "0xdffcC3536D932eb51Df51a7F5FA407c4270d5308",
+      "implementation": "0xA1f75D801633a1941cae6670352d627884dC3b68",
+      "implementationType": "EtherFiSpokeInstance",
+      "oracle": "0xe8cbd37210bF1E29436dAe183d7b9fe45E886fA8",
+      "borrowGate": {
+        "dataProvider": "0xDC515Cb479a64552c5A11a57109C314E40A1A778",
+        "note": "borrow onBehalfOf must be an ether.fi Cash Safe; no position managers deployed"
+      }
+    }
+  },
+  "treasurySpoke": "0x7EB4d25F137868662350603A2863F682287b0768",
+  "payloads": {
+    "launch": {
+      "address": "0xBc0D2823611cb0C1c1a598DdC4d051289E368449",
+      "type": "EtherfiCashLaunchPayload",
+      "phase": 1,
+      "executionTx": "0x6b83c289f3110a3e1a2aa23eaf4a61d7bbb281972319a5a1b3e33533988a2b16"
+    },
+    "activation": {
+      "address": "0x5F64dE77e63E9CDfF87d818FA373c8593b0b20f3",
+      "type": "EtherfiCashActivationPayload",
+      "phase": 2,
+      "executionTx": "0xc2905e08b1fe173911c70a78c5d880e522614c4f351e7030760e72668417aefc"
+    }
+  },
+  "administration": {
+    "ownerSafe": "0x082B85ED50F1cd120C597EF860ece712e54CE844",
+    "operatorSafe": "0x23c30c38d73a0D1609ffAAe47aA7d6D1a3e46f03",
+    "roles": {
+      "HUB_RISK_CURATOR_ROLE": 201,
+      "HUB_GUARDIAN_ROLE": 202,
+      "SPOKE_RISK_CURATOR_ROLE": 401,
+      "SPOKE_GUARDIAN_ROLE": 402
+    }
+  },
+  "reserves": {
+    "USDC": {
+      "underlying": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+      "oracle": "0x87C74CB64b69FD6b338EE15F9772F05668914ED7",
+      "decimals": 6,
+      "borrowable": true
+    },
+    "WETH": {
+      "underlying": "0x4200000000000000000000000000000000000006",
+      "oracle": "0xCFe45EF2B9E138E5A2e1C25592441D5c556B3ca3",
+      "decimals": 18,
+      "borrowable": true
+    },
+    "USDT": {
+      "underlying": "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58",
+      "oracle": "0x3Fe46756Ece51Dac6dd202F2e2b45454D4F8b89c",
+      "decimals": 6,
+      "borrowable": false
+    },
+    "EURC": {
+      "underlying": "0xDCB612005417Dc906fF72c87DF732e5a90D49e11",
+      "oracle": "0xc700125927b9f6ffae2F7b77D1D14cC725bAe628",
+      "decimals": 6,
+      "borrowable": false
+    },
+    "frxUSD": {
+      "underlying": "0x80Eede496655FB9047dd39d9f418d5483ED600df",
+      "oracle": "0xf1cF6275a3DD9DEf2bF902BCc25BfE4E1aB9Cc1b",
+      "decimals": 18,
+      "borrowable": false
+    },
+    "weETH": {
+      "underlying": "0x5A7fACB970D094B6C7FF1df0eA68D99E6e73CBFF",
+      "oracle": "0x9e1cAf5C8E7aB34628EA5973C0F2945bBD5109aC",
+      "decimals": 18,
+      "borrowable": false
+    },
+    "eBTC": {
+      "underlying": "0x657e8C867D8B37dCC18fA4Caead9C45EB088C642",
+      "oracle": "0x0fdF97E16f0bd50513Eed2771d4BC31265166488",
+      "decimals": 8,
+      "borrowable": false
+    },
+    "eUSD": {
+      "underlying": "0x939778D83b46B456224A33Fb59630B11DEC56663",
+      "oracle": "0x106399f5fCb6b1401b99A0B12F075721d518aD63",
+      "decimals": 18,
+      "borrowable": false
+    },
+    "ETHFI": {
+      "underlying": "0xe0080d2F853ecDdbd81A643dC10DA075Df26fD3f",
+      "oracle": "0x823d8De4d50454E7e1529Ed8b390DaD973f3Daba",
+      "decimals": 18,
+      "borrowable": false
+    },
+    "sETHFI": {
+      "underlying": "0x86B5780b606940Eb59A062aA85a07959518c0161",
+      "oracle": "0x14c7600aC4023ccCf72fe81b1d475764c9214b13",
+      "decimals": 18,
+      "borrowable": false
+    },
+    "OP": {
+      "underlying": "0x4200000000000000000000000000000000000042",
+      "oracle": "0x6D53a69EBC75cFeDf319F77569a4F732f75AED79",
+      "decimals": 18,
+      "borrowable": false
+    },
+    "WHYPE": {
+      "underlying": "0xd83E3d560bA6F05094d9D8B3EB8aaEA571D1864E",
+      "oracle": "0xc4ca8A733aB9686753F1fc47443c46dEdb7b3670",
+      "decimals": 18,
+      "borrowable": false
+    },
+    "beHYPE": {
+      "underlying": "0xA519AfBc91986c0e7501d7e34968FEE51CD901aC",
+      "oracle": "0x259992e490BbfB94A08B51C753FBd001CC3b9Fb8",
+      "decimals": 18,
+      "borrowable": false
+    },
+    "liquidETH": {
+      "underlying": "0xf0bb20865277aBd641a307eCe5Ee04E79073416C",
+      "oracle": "0x4829C107Bc9896792c6f54bBF2Cb6F3322f20eCD",
+      "decimals": 18,
+      "borrowable": false
+    },
+    "liquidBTC": {
+      "underlying": "0x5f46d540b6eD704C3c8789105F30E075AA900726",
+      "oracle": "0xc5b599B15826d50b1f9Ef9dF7a68a14cCb4123b3",
+      "decimals": 8,
+      "borrowable": false
+    },
+    "liquidUSD": {
+      "underlying": "0x08c6F91e2B681FaF5e17227F2a44C307b3C1364C",
+      "oracle": "0x7E916FE60091497c74D4aEd43A7Cf348e40AE38C",
+      "decimals": 6,
+      "borrowable": false
+    },
+    "liquidRESERVE": {
+      "underlying": "0xca5921DF65E2e1b0B98Ae91c0187BA80D4124898",
+      "oracle": "0x6D7b3725Faa812FE5e29EB67068882A71228b0CB",
+      "decimals": 18,
+      "borrowable": false
+    },
+    "weEUR": {
+      "underlying": "0xcC476B1a49bcDf5192561e87b6Fb8ea78aa28C13",
+      "oracle": "0x4fdc1B6638f277bc2468Fb910f833678DF119f26",
+      "decimals": 18,
+      "borrowable": false
+    },
+    "liquidRWA": {
+      "underlying": "0x17bC8Ffd82b8a36e737Ca1141C025089589B915e",
+      "oracle": "0x6148eE0E0923Ed5F0cCde2600a85166f4E250154",
+      "decimals": 18,
+      "borrowable": false
+    }
+  }
+}
