@@ -383,10 +383,6 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
     _check(what, uint160(actual), uint160(expected));
   }
 
-  function _checkSel(string memory what, bytes4 actual, bytes4 expected) internal {
-    _check(what, uint32(actual), uint32(expected));
-  }
-
   function _assertNoMismatches(string memory what) internal {
     uint256 count = mismatches;
     mismatches = 0;

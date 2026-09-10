@@ -102,27 +102,27 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     );
     txs[2] = _setTargetFunctionRole(
       Cash.HUB_CONFIGURATOR,
-      _sel(R.SEL_UPDATE_LIQUIDITY_FEE),
+      _sel(IHubConfigurator.updateLiquidityFee.selector),
       R.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE
     );
     txs[3] = _setTargetFunctionRole(
       Cash.HUB_CONFIGURATOR,
-      _sel(R.SEL_UPDATE_SPOKE_HALTED),
+      _sel(IHubConfigurator.updateSpokeHalted.selector),
       R.HUB_CONFIGURATOR_SPOKE_HALTED_ROLE
     );
     txs[4] = _setTargetFunctionRole(
       Cash.SPOKE_CONFIGURATOR,
-      _sel(R.SEL_UPDATE_BORROWABLE),
+      _sel(ISpokeConfigurator.updateBorrowable.selector),
       R.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE
     );
     txs[5] = _setTargetFunctionRole(
       Cash.SPOKE_CONFIGURATOR,
-      _sel(R.SEL_UPDATE_PAUSED, R.SEL_UPDATE_FROZEN),
+      _sel(ISpokeConfigurator.updatePaused.selector, ISpokeConfigurator.updateFrozen.selector),
       R.SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE
     );
     txs[6] = _setTargetFunctionRole(
       Cash.SPOKE_CONFIGURATOR,
-      _sel(R.SEL_UPDATE_LIQUIDATION_CONFIG),
+      _sel(ISpokeConfigurator.updateLiquidationConfig.selector),
       R.SPOKE_RISK_CURATOR_ROLE
     );
     txs[7] = _grantRole(R.HUB_CONFIGURATOR_SPOKE_HALTED_ROLE, Cash.OWNER_SAFE);
@@ -351,28 +351,6 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     _check('SPOKE_RISK_CURATOR_ROLE', R.SPOKE_RISK_CURATOR_ROLE, payload.SPOKE_RISK_CURATOR_ROLE());
     _check('SPOKE_GUARDIAN_ROLE', R.SPOKE_GUARDIAN_ROLE, payload.SPOKE_GUARDIAN_ROLE());
 
-    _checkSel(
-      'SEL_UPDATE_LIQUIDITY_FEE',
-      R.SEL_UPDATE_LIQUIDITY_FEE,
-      IHubConfigurator.updateLiquidityFee.selector
-    );
-    _checkSel(
-      'SEL_UPDATE_SPOKE_HALTED',
-      R.SEL_UPDATE_SPOKE_HALTED,
-      IHubConfigurator.updateSpokeHalted.selector
-    );
-    _checkSel(
-      'SEL_UPDATE_BORROWABLE',
-      R.SEL_UPDATE_BORROWABLE,
-      ISpokeConfigurator.updateBorrowable.selector
-    );
-    _checkSel('SEL_UPDATE_PAUSED', R.SEL_UPDATE_PAUSED, ISpokeConfigurator.updatePaused.selector);
-    _checkSel('SEL_UPDATE_FROZEN', R.SEL_UPDATE_FROZEN, ISpokeConfigurator.updateFrozen.selector);
-    _checkSel(
-      'SEL_UPDATE_LIQUIDATION_CONFIG',
-      R.SEL_UPDATE_LIQUIDATION_CONFIG,
-      ISpokeConfigurator.updateLiquidationConfig.selector
-    );
     _check(
       'CONFIGURATOR_SELECTOR_COUNT',
       R.CONFIGURATOR_SELECTOR_COUNT,
@@ -472,15 +450,22 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     bool migrated
   ) internal pure returns (uint64) {
     if (migrated && target == Cash.HUB_CONFIGURATOR) {
-      if (selector == R.SEL_UPDATE_LIQUIDITY_FEE) return R.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE;
-      if (selector == R.SEL_UPDATE_SPOKE_HALTED) return R.HUB_CONFIGURATOR_SPOKE_HALTED_ROLE;
+      if (selector == IHubConfigurator.updateLiquidityFee.selector)
+        return R.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE;
+      if (selector == IHubConfigurator.updateSpokeHalted.selector)
+        return R.HUB_CONFIGURATOR_SPOKE_HALTED_ROLE;
     }
     if (migrated && target == Cash.SPOKE_CONFIGURATOR) {
-      if (selector == R.SEL_UPDATE_BORROWABLE) return R.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE;
-      if (selector == R.SEL_UPDATE_PAUSED || selector == R.SEL_UPDATE_FROZEN) {
+      if (selector == ISpokeConfigurator.updateBorrowable.selector)
+        return R.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE;
+      if (
+        selector == ISpokeConfigurator.updatePaused.selector ||
+        selector == ISpokeConfigurator.updateFrozen.selector
+      ) {
         return R.SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE;
       }
-      if (selector == R.SEL_UPDATE_LIQUIDATION_CONFIG) return R.SPOKE_RISK_CURATOR_ROLE;
+      if (selector == ISpokeConfigurator.updateLiquidationConfig.selector)
+        return R.SPOKE_RISK_CURATOR_ROLE;
     }
     for (uint256 i; i < launch.length; i++) {
       if (launch[i].target != target) continue;

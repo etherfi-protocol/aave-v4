@@ -57,8 +57,8 @@ library AaveV4EtherfiCash {
   // timelock governance (parameters in AaveV4EtherfiCashTimelock, migration in
   // scripts/etherfi/timelock). The Timelock Safe is the sole PROPOSER of the timelock — a
   // signer set distinct from the Owner (Admin) Safe, which keeps a veto (CANCELLER_ROLE) and the
-  // un-halt / un-pause roles. STAGED until the Safe exists.
-  address internal constant TIMELOCK_SAFE = address(0);
+  // un-halt / un-pause roles.
+  address internal constant TIMELOCK_SAFE = 0xd442635bc9bF83E21bBA8B65e224F5Db6a011166;
   // EtherFiTimelock — PREDICTED: CREATE2 via the Safe Singleton Factory with
   // AaveV4EtherfiCashTimelock.SALT and constant constructor args, so it is deployer-independent.
   // Pin after `deploy()` prints it; the script asserts equality.
@@ -234,14 +234,6 @@ library AaveV4EtherfiCashRoles {
     'HUB_CONFIGURATOR_SPOKE_HALTED_ROLE';
   string internal constant SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE_LABEL =
     'SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE';
-
-  // selectors the timelock migration reassigns (from -> to)
-  bytes4 internal constant SEL_UPDATE_LIQUIDITY_FEE = 0x0f8916cf; // HubConfigurator.updateLiquidityFee      201 -> 200
-  bytes4 internal constant SEL_UPDATE_SPOKE_HALTED = 0x91c28cf9; // HubConfigurator.updateSpokeHalted        201 -> 203
-  bytes4 internal constant SEL_UPDATE_BORROWABLE = 0x46bfdc72; // SpokeConfigurator.updateBorrowable         401 -> 400
-  bytes4 internal constant SEL_UPDATE_PAUSED = 0x5f42a73b; // SpokeConfigurator.updatePaused                 401 -> 403
-  bytes4 internal constant SEL_UPDATE_FROZEN = 0x3a84f85a; // SpokeConfigurator.updateFrozen                 401 -> 403
-  bytes4 internal constant SEL_UPDATE_LIQUIDATION_CONFIG = 0xd15916be; // SpokeConfigurator.updateLiquidationConfig 400 -> 401
 
   /// @dev 22 HubConfigurator + 24 SpokeConfigurator selectors (Roles.sol); the whole map is read back
   uint256 internal constant CONFIGURATOR_SELECTOR_COUNT = 46;
