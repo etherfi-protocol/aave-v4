@@ -122,3 +122,28 @@ etherfi-deploy-engine :;
 	forge script scripts/etherfi/DeployEtherfiCashConfigEngine.s.sol:DeployEtherfiCashConfigEngineScript \
 	--rpc-url optimism --account ${account} --sender ${sender} --slow \
 	$(if ${dry},, --broadcast --verify) \
+
+# ether.fi Cash timelock migration (OP Mainnet). Every input lives in src/etherfi/AaveV4EtherfiCash.sol
+# (TIMELOCK_SAFE, TIMELOCK, ProxyAdmins, AaveV4EtherfiCashTimelock, AaveV4EtherfiCashRoles).
+#
+# Phase 1a: deploy the EtherFiTimelock — CREATE2 via the Safe Singleton Factory, deployer-independent,
+# idempotent (re-verifies bytecode + roles if it already exists). Any funded key; --sender is required
+# for the same reason as etherfi-deploy-engine.
+# `make etherfi-timelock-deploy account=<keystore> sender=<keystore address>` (set dry=1 to simulate)
+etherfi-timelock-deploy :;
+	forge script scripts/etherfi/timelock/EtherfiCashTimelock.s.sol:EtherfiCashTimelockScript --sig 'deploy()' \
+	--rpc-url optimism --account ${account} --sender ${sender} --slow \
+	$(if ${dry},, --broadcast --verify) \
+
+# Phases 1b-5: read-only. Verifies every completed phase against the plan and writes the NEXT Safe
+# batch (Transaction Builder JSON + .md twin) to output/etherfi/timelock/. Re-run after each Safe
+# execution / timelock maturity until it prints COMPLETE.
+# `make etherfi-timelock-configure`
+etherfi-timelock-configure :;
+	forge script scripts/etherfi/timelock/EtherfiCashTimelock.s.sol:EtherfiCashTimelockScript --sig 'configure()' \
+	--rpc-url optimism
+
+# Fork dress rehearsal of the whole migration (replays the emitted batches, then behavioural checks)
+# `make etherfi-timelock-rehearse`
+etherfi-timelock-rehearse :;
+	forge test --match-path tests/etherfi/EtherfiCashTimelockFork.t.sol --fork-url ${RPC_OPTIMISM} -vv
