@@ -31,8 +31,10 @@ import {IAaveV4ConfigEngine} from 'src/config-engine/interfaces/IAaveV4ConfigEng
 ///               Safe batch to output/etherfi/timelock/. Re-run after each Safe execution or
 ///               timelock maturity until it returns COMPLETE.
 ///
-///   make etherfi-timelock-deploy account=<keystore> sender=<address>
-///   make etherfi-timelock-configure
+///   forge script scripts/etherfi/timelock/EtherfiCashTimelock.s.sol --sig 'deploy()' \
+///     --rpc-url optimism --account <keystore> --sender <address> --slow --broadcast --verify
+///   forge script scripts/etherfi/timelock/EtherfiCashTimelock.s.sol --sig 'configure()' \
+///     --rpc-url optimism
 contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
   enum Phase {
     DEPLOY,
