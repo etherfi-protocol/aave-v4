@@ -53,19 +53,32 @@ library AaveV4EtherfiCash {
   // updates rather than reverts). Once the KMS EOA exists, grant it the guardian roles
   // directly from the Owner Safe (grantRole 202/402) — no payload or constant change needed.
   address internal constant GUARDIAN_CURATOR = 0x23c30c38d73a0D1609ffAAe47aA7d6D1a3e46f03;
+
+  // timelock governance (parameters in AaveV4EtherfiCashTimelock, migration in
+  // scripts/etherfi/timelock). The Timelock Safe is the sole PROPOSER of the timelock — a
+  // signer set distinct from the Owner (Admin) Safe, which keeps a veto (CANCELLER_ROLE) and the
+  // un-halt / un-pause roles.
+  address internal constant TIMELOCK_SAFE = 0xd442635bc9bF83E21bBA8B65e224F5Db6a011166;
+  // EtherFiTimelock — PREDICTED: CREATE2 via the Safe Singleton Factory with
+  // AaveV4EtherfiCashTimelock.SALT and constant constructor args, so it is deployer-independent.
+  // Pin after `deploy()` prints it; the script asserts equality.
+  address internal constant TIMELOCK = address(0);
 }
 
 /// @notice Hubs of the ether.fi Cash Aave V4 instance.
 library AaveV4EtherfiCashHubs {
   address internal constant CASH_HUB = 0x66753c4e3fC84f1eD0e3C267C927284E9d90C572; // PREDICTED
   address internal constant CASH_HUB_IR_STRATEGY = 0x51d07C362f9c4716F96EbEB63DB985EF9D2aCd7C; // PREDICTED
+  address internal constant CASH_HUB_PROXY_ADMIN = 0xed57ae702efc1774A131689E9D9b876E4063F6F5; // VERIFIED 2026-09-09 (EIP-1967 admin slot)
 }
 
 /// @notice Spokes of the ether.fi Cash Aave V4 instance.
 library AaveV4EtherfiCashSpokes {
   address internal constant CASH_SPOKE = 0xdffcC3536D932eb51Df51a7F5FA407c4270d5308; // PREDICTED (nonce 3 + exact sequence; EtherFiSpokeInstance, canonical-lib link)
   address internal constant CASH_SPOKE_IMPLEMENTATION = 0xA1f75D801633a1941cae6670352d627884dC3b68; // PREDICTED (canonical-lib link)
+  address internal constant CASH_SPOKE_PROXY_ADMIN = 0xAc44Bde208560611E8C865EE721Dc9CCb54a0596; // VERIFIED 2026-09-09 (EIP-1967 admin slot)
   address internal constant TREASURY_SPOKE = 0x7EB4d25F137868662350603A2863F682287b0768; // PREDICTED (fee receiver)
+  address internal constant TREASURY_SPOKE_PROXY_ADMIN = 0x917A5aeeAcf54Ab58d690E18f80453820E473aCC; // VERIFIED 2026-09-09 (EIP-1967 admin slot)
 }
 
 /// @notice Launch assets: underlying + price source (+ decimals), all VERIFIED on-chain.
@@ -174,4 +187,54 @@ library AaveV4EtherfiCashCaps {
   uint40 internal constant LIQUID_RESERVE_ADD_CAP = 1_000_000;
   uint40 internal constant WEEUR_ADD_CAP = 1_000_000;
   uint40 internal constant LIQUID_RWA_ADD_CAP = 1_000_000;
+}
+
+/// @notice EtherFiTimelock parameters (cash-v3 contract, OpenZeppelin TimelockController). Not part of
+/// the address-book upstream — governance configuration only.
+library AaveV4EtherfiCashTimelock {
+  uint256 internal constant MIN_DELAY = 24 hours; // 86400
+  /// @dev address(0) executor = OPEN execution: anyone may execute a matured operation; safety
+  /// comes from the delay and the cancellers. Use TIMELOCK_SAFE for a signature at execution.
+  address internal constant EXECUTOR = address(0);
+  /// @dev no external admin: the timelock administers its own roles behind the delay
+  address internal constant ADMIN = address(0);
+  /// @dev CREATE2 salt (Safe Singleton Factory); bump the suffix for a new deployment
+  bytes32 internal constant SALT = keccak256('ETHERFI_CASH_AAVE_V4_TIMELOCK_V1');
+  /// @dev keccak256('CANCELLER_ROLE') = 0xfd643c72710c63c0180259aba6b2d05451e3591a24e58b62239378085726f783
+  bytes32 internal constant CANCELLER_ROLE = keccak256('CANCELLER_ROLE');
+
+  // salts of the migration's scheduled operations (deterministic ids let the script track them)
+  bytes32 internal constant OP_SALT_CANCELLERS =
+    keccak256('ETHERFI_CASH_TIMELOCK_OP_CANCELLERS_V1');
+  bytes32 internal constant OP_SALT_DRY_RUN = keccak256('ETHERFI_CASH_TIMELOCK_OP_DRY_RUN_V1');
+  bytes32 internal constant OP_SALT_TREASURY_ACCEPT =
+    keccak256('ETHERFI_CASH_TIMELOCK_OP_TREASURY_ACCEPT_V1');
+}
+
+/// @notice AccessManager roles of the instance: Aave Roles.sol IDs, the launch payload's curator /
+/// guardian roles and the timelock migration's restart roles, plus the configurator selectors the
+/// migration moves. Plain values on purpose (no imports) so they can be compared to the plan by
+/// eye; the migration helpers cross-check every one of them against Roles.sol, the launch payload
+/// and the configurator interfaces at runtime. Not part of the address-book upstream.
+library AaveV4EtherfiCashRoles {
+  uint64 internal constant ADMIN_ROLE = 0; // Roles.ACCESS_MANAGER_ADMIN_ROLE
+  uint64 internal constant HUB_FEE_MINTER_ROLE = 102; // Roles.HUB_FEE_MINTER_ROLE
+  uint64 internal constant HUB_DEFICIT_ELIMINATOR_ROLE = 103; // Roles.HUB_DEFICIT_ELIMINATOR_ROLE
+  uint64 internal constant HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE = 200; // Roles.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE
+  uint64 internal constant HUB_RISK_CURATOR_ROLE = 201; // EtherfiCashLaunchPayload
+  uint64 internal constant HUB_GUARDIAN_ROLE = 202; // EtherfiCashLaunchPayload
+  uint64 internal constant HUB_CONFIGURATOR_SPOKE_HALTED_ROLE = 203; // timelock migration: un-halt spokes (Admin Safe)
+  uint64 internal constant SPOKE_USER_POSITION_UPDATER_ROLE = 302; // Roles.SPOKE_USER_POSITION_UPDATER_ROLE
+  uint64 internal constant SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE = 400; // Roles.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE
+  uint64 internal constant SPOKE_RISK_CURATOR_ROLE = 401; // EtherfiCashLaunchPayload
+  uint64 internal constant SPOKE_GUARDIAN_ROLE = 402; // EtherfiCashLaunchPayload
+  uint64 internal constant SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE = 403; // timelock migration: un-pause / un-freeze reserves (Admin Safe)
+
+  string internal constant HUB_CONFIGURATOR_SPOKE_HALTED_ROLE_LABEL =
+    'HUB_CONFIGURATOR_SPOKE_HALTED_ROLE';
+  string internal constant SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE_LABEL =
+    'SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE';
+
+  /// @dev 22 HubConfigurator + 24 SpokeConfigurator selectors (Roles.sol); the whole map is read back
+  uint256 internal constant CONFIGURATOR_SELECTOR_COUNT = 46;
 }
