@@ -22,12 +22,19 @@ import {Ownable2StepUpgradeable} from 'src/dependencies/openzeppelin-upgradeable
 /// specific to one migration.
 ///   - `_grantRole`, `_revokeRole`, `_labelRole`, `_setTargetFunctionRole`, `_setRoleGuardian`:
 ///     AccessManager calls as Safe transactions with a readable note
-///   - `_transferOwnership`, `_acceptOwnership`, `_timelockGrantRole`: Ownable / AccessControl calls
+///   - `_transferOwnership`, `_acceptOwnership`, `_timelockGrantRole`, `_timelockRevokeRole`:
+///     Ownable / AccessControl calls
 ///   - `_emitBatch`: write a Safe Transaction Builder batch (+ .md twin), remembered in `lastEmitted`
+///   - `_writeBatch` / `_previewExecute`: write a batch that is not the next step (execute batches
+///     of operations still maturing, so signers can review and queue them early)
 ///   - `_driveOperation` / `_isOperationDone`: schedule → wait → execute a TimelockController batch
+///   - `_emitSchedules`: one Safe MultiSend that schedules several operations at once
+///   - `_emitScheduleAlongside`: a schedule batch that is independent of `lastEmitted` and may be
+///     sent at the same time (recorded in `alsoEmitted`), so the delay overlaps the current step
 ///   - `_check*` / `_assertNoMismatches`: accumulate mismatches, revert with the count
 abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
-  /// @notice The batch last written; `signer` == address(0) means anyone may send it.
+  /// @notice The batch last written; `signer` == address(0) means anyone may send it (open
+  /// timelock execution).
   struct Emitted {
     string path;
     address signer;
@@ -39,8 +46,12 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
     0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103;
 
   error Mismatches(string what, uint256 count);
+  error NotExecutor(address timelock, address executor);
 
   Emitted public lastEmitted;
+  /// @notice A second batch written for the same step that does not depend on `lastEmitted` and
+  /// may be sent at the same time, by its own signer (empty path when there is none).
+  Emitted public alsoEmitted;
   uint256 internal mismatches;
 
   // ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -167,6 +178,19 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
       );
   }
 
+  function _timelockRevokeRole(
+    address timelock,
+    bytes32 role,
+    address account
+  ) internal pure returns (GnosisTxBuilder.Tx memory) {
+    return
+      _tx(
+        timelock,
+        abi.encodeCall(IAccessControl.revokeRole, (role, account)),
+        string.concat('Timelock.revokeRole(', vm.toString(role), ', ', vm.toString(account), ')')
+      );
+  }
+
   function _sel(bytes4 a) internal pure returns (bytes4[] memory s) {
     s = new bytes4[](1);
     s[0] = a;
@@ -199,13 +223,7 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
 
   /// @dev Writes a Safe Transaction Builder batch for `safe` and records it in `lastEmitted`.
   function _emitBatch(address safe, string memory name, GnosisTxBuilder.Tx[] memory txs) internal {
-    string memory path = GnosisTxBuilder.write(
-      OUTPUT_DIR,
-      name,
-      string.concat(vm.toString(txs.length), ' CALL transactions for ', vm.toString(safe)),
-      safe,
-      txs
-    );
+    string memory path = _writeBatch(safe, name, txs);
     lastEmitted = Emitted({path: path, signer: safe});
     console2.log('[next] wrote', path);
     console2.log('       signer:', safe);
@@ -214,11 +232,32 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
     }
   }
 
+  /// @dev Writes a Safe Transaction Builder batch for `safe` without making it the next step.
+  function _writeBatch(
+    address safe,
+    string memory name,
+    GnosisTxBuilder.Tx[] memory txs
+  ) internal returns (string memory) {
+    return
+      GnosisTxBuilder.write(
+        OUTPUT_DIR,
+        name,
+        string.concat(vm.toString(txs.length), ' CALL transactions for ', vm.toString(safe)),
+        safe,
+        txs
+      );
+  }
+
   /// @dev Drives one TimelockController batch operation by its state: emits the proposer's
-  /// schedule batch, reports the wait, or emits the execute batch (open execution: any signer).
+  /// schedule batch, reports the wait, or emits the execute batch. The execute batch is written
+  /// for `executor` unless the timelock's EXECUTOR_ROLE is open (held by address(0)), in which
+  /// case any account may send it. While the operation is unscheduled or maturing the execute
+  /// batch is pre-written too (calldata is deterministic), so it can be reviewed and queued in
+  /// the Safe ahead of time; it only becomes the next step once the operation is Ready.
   function _driveOperation(
     address timelock,
     address proposer,
+    address executor,
     string memory name,
     bytes32 salt,
     uint256 delay,
@@ -229,13 +268,13 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
     TimelockController.OperationState state = tl.getOperationState(id);
     if (state == TimelockController.OperationState.Unset) {
       _emitSchedule(timelock, proposer, name, salt, delay, txs);
-      console2.log('       operation id:');
-      console2.logBytes32(id);
+      _previewExecute(timelock, executor, name, salt, txs);
     } else if (state == TimelockController.OperationState.Waiting) {
       delete lastEmitted;
       console2.log('[wait]', name, ': scheduled, executable at unix time', tl.getTimestamp(id));
+      _previewExecute(timelock, executor, name, salt, txs);
     } else if (state == TimelockController.OperationState.Ready) {
-      _emitExecute(timelock, proposer, name, salt, txs);
+      _emitExecute(timelock, executor, name, salt, txs);
     }
   }
 
@@ -247,37 +286,129 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
     uint256 delay,
     GnosisTxBuilder.Tx[] memory txs
   ) internal {
-    (address[] memory targets, uint256[] memory values, bytes[] memory payloads) = _split(txs);
-    GnosisTxBuilder.Tx[] memory one = new GnosisTxBuilder.Tx[](1);
-    one[0] = _tx(
-      timelock,
-      abi.encodeCall(
-        TimelockController.scheduleBatch,
-        (targets, values, payloads, bytes32(0), salt, delay)
-      ),
-      string.concat('Timelock.scheduleBatch, delay ', vm.toString(delay), 's, of: ', _notes(txs))
-    );
-    _emitBatch(proposer, string.concat(name, '-schedule'), one);
+    bytes32[] memory salts = new bytes32[](1);
+    salts[0] = salt;
+    GnosisTxBuilder.Tx[][] memory ops = new GnosisTxBuilder.Tx[][](1);
+    ops[0] = txs;
+    _emitSchedules(timelock, proposer, name, salts, delay, ops);
   }
 
-  function _emitExecute(
+  /// @dev One Safe batch (MultiSend) from `proposer` that schedules `ops.length` separate
+  /// timelock operations, `salts[i]` for `ops[i]`; each is then executed on its own.
+  function _emitSchedules(
     address timelock,
     address proposer,
+    string memory name,
+    bytes32[] memory salts,
+    uint256 delay,
+    GnosisTxBuilder.Tx[][] memory ops
+  ) internal {
+    GnosisTxBuilder.Tx[] memory schedules = new GnosisTxBuilder.Tx[](ops.length);
+    for (uint256 i; i < ops.length; i++) {
+      schedules[i] = _scheduleCall(timelock, salts[i], delay, ops[i]);
+    }
+    _emitBatch(proposer, string.concat(name, '-schedule'), schedules);
+    for (uint256 i; i < ops.length; i++) {
+      console2.log(string.concat('       operation id ', vm.toString(i + 1), ':'));
+      console2.logBytes32(_operationId(timelock, salts[i], ops[i]));
+    }
+  }
+
+  /// @dev Writes the schedule batch of an unscheduled operation as a step that runs ALONGSIDE the
+  /// current `[next]` batch: scheduling only needs `proposer`'s PROPOSER seat, so it can be sent
+  /// now and the delay overlaps whatever `[next]` still has to do. Recorded in `alsoEmitted`
+  /// (never in `lastEmitted`). The execute batch is pre-written for `executor` too.
+  function _emitScheduleAlongside(
+    address timelock,
+    address proposer,
+    address executor,
+    string memory name,
+    bytes32 salt,
+    uint256 delay,
+    GnosisTxBuilder.Tx[] memory txs
+  ) internal {
+    GnosisTxBuilder.Tx[] memory one = new GnosisTxBuilder.Tx[](1);
+    one[0] = _scheduleCall(timelock, salt, delay, txs);
+    string memory path = _writeBatch(proposer, string.concat(name, '-schedule'), one);
+    alsoEmitted = Emitted({path: path, signer: proposer});
+    console2.log('[also] wrote', path);
+    console2.log('       signer:', proposer);
+    console2.log('       independent of [next]: may be sent now so the delay overlaps');
+    console2.log(string.concat('       1. ', one[0].note));
+    console2.log('       operation id:');
+    console2.logBytes32(_operationId(timelock, salt, txs));
+    _previewExecute(timelock, executor, name, salt, txs);
+  }
+
+  /// @dev Pre-writes the execute batch of an operation that is not Ready yet (for `executor`;
+  /// the Safe file is the same whether execution turns out open or not). Not the next step.
+  function _previewExecute(
+    address timelock,
+    address executor,
     string memory name,
     bytes32 salt,
     GnosisTxBuilder.Tx[] memory txs
   ) internal {
-    (address[] memory targets, uint256[] memory values, bytes[] memory payloads) = _split(txs);
     GnosisTxBuilder.Tx[] memory one = new GnosisTxBuilder.Tx[](1);
-    one[0] = _tx(
-      timelock,
-      abi.encodeCall(
-        TimelockController.executeBatch,
-        (targets, values, payloads, bytes32(0), salt)
-      ),
-      string.concat('Timelock.executeBatch of: ', _notes(txs))
-    );
-    _emitBatch(proposer, string.concat(name, '-execute'), one);
+    one[0] = _executeCall(timelock, salt, txs);
+    string memory path = _writeBatch(executor, string.concat(name, '-execute'), one);
+    console2.log('[prep] wrote', path);
+    console2.log('       execute batch for', executor, '- sendable once the operation matures');
+  }
+
+  /// @dev The `executeBatch` call for one operation, as a Safe transaction.
+  function _executeCall(
+    address timelock,
+    bytes32 salt,
+    GnosisTxBuilder.Tx[] memory txs
+  ) internal pure returns (GnosisTxBuilder.Tx memory) {
+    (address[] memory targets, uint256[] memory values, bytes[] memory payloads) = _split(txs);
+    return
+      _tx(
+        timelock,
+        abi.encodeCall(
+          TimelockController.executeBatch,
+          (targets, values, payloads, bytes32(0), salt)
+        ),
+        string.concat('Timelock.executeBatch of: ', _notes(txs))
+      );
+  }
+
+  /// @dev The `scheduleBatch` call for one operation, as a Safe transaction.
+  function _scheduleCall(
+    address timelock,
+    bytes32 salt,
+    uint256 delay,
+    GnosisTxBuilder.Tx[] memory txs
+  ) internal pure returns (GnosisTxBuilder.Tx memory) {
+    (address[] memory targets, uint256[] memory values, bytes[] memory payloads) = _split(txs);
+    return
+      _tx(
+        timelock,
+        abi.encodeCall(
+          TimelockController.scheduleBatch,
+          (targets, values, payloads, bytes32(0), salt, delay)
+        ),
+        string.concat('Timelock.scheduleBatch, delay ', vm.toString(delay), 's, of: ', _notes(txs))
+      );
+  }
+
+  function _emitExecute(
+    address timelock,
+    address executor,
+    string memory name,
+    bytes32 salt,
+    GnosisTxBuilder.Tx[] memory txs
+  ) internal {
+    TimelockController tl = TimelockController(payable(timelock));
+    bytes32 executorRole = tl.EXECUTOR_ROLE();
+    bool open = tl.hasRole(executorRole, address(0));
+    require(open || tl.hasRole(executorRole, executor), NotExecutor(timelock, executor));
+
+    GnosisTxBuilder.Tx[] memory one = new GnosisTxBuilder.Tx[](1);
+    one[0] = _executeCall(timelock, salt, txs);
+    _emitBatch(executor, string.concat(name, '-execute'), one);
+    if (!open) return;
     lastEmitted.signer = address(0);
     console2.log('       open execution - any account may send, e.g.');
     console2.log(
@@ -313,6 +444,15 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
     GnosisTxBuilder.Tx[] memory txs
   ) internal view returns (bool) {
     return TimelockController(payable(timelock)).isOperationDone(_operationId(timelock, salt, txs));
+  }
+
+  /// @dev Scheduled at some point (waiting, ready or done).
+  function _isOperation(
+    address timelock,
+    bytes32 salt,
+    GnosisTxBuilder.Tx[] memory txs
+  ) internal view returns (bool) {
+    return TimelockController(payable(timelock)).isOperation(_operationId(timelock, salt, txs));
   }
 
   function _split(

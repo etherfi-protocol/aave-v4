@@ -49,15 +49,15 @@ contract EtherfiCashTimelockForkTest is Test {
       'runtime code'
     );
 
-    _step(EtherfiCashTimelockScript.Phase.CANCELLERS); // schedule (Timelock Safe)
-    _step(EtherfiCashTimelockScript.Phase.CANCELLERS); // waiting -> +24h
-    _step(EtherfiCashTimelockScript.Phase.CANCELLERS); // execute (anyone)
+    _step(EtherfiCashTimelockScript.Phase.EXECUTOR); // MultiSend: schedule both ops (Timelock Safe)
+    _step(EtherfiCashTimelockScript.Phase.EXECUTOR); // waiting -> +24h
+    _step(EtherfiCashTimelockScript.Phase.EXECUTOR); // execute 1b-i (anyone: last open execution)
+    _step(EtherfiCashTimelockScript.Phase.CANCELLERS); // execute 1b-ii (Timelock Safe only)
 
-    _step(EtherfiCashTimelockScript.Phase.ACCESS_MANAGER); // Admin Safe batch
+    _step(EtherfiCashTimelockScript.Phase.ACCESS_MANAGER); // Admin Safe batch + [also] phase 3 schedule (Timelock Safe)
 
-    _step(EtherfiCashTimelockScript.Phase.DRY_RUN);
-    _step(EtherfiCashTimelockScript.Phase.DRY_RUN);
-    _step(EtherfiCashTimelockScript.Phase.DRY_RUN);
+    _step(EtherfiCashTimelockScript.Phase.DRY_RUN); // waiting -> +24h
+    _step(EtherfiCashTimelockScript.Phase.DRY_RUN); // execute (Timelock Safe only)
 
     _step(EtherfiCashTimelockScript.Phase.OWNERSHIP); // Admin Safe batch
 
@@ -148,7 +148,10 @@ contract EtherfiCashTimelockForkTest is Test {
       Cash.ACCESS_MANAGER,
       abi.encodeCall(
         IAccessManager.labelRole,
-        (R.SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE, R.SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE_LABEL)
+        (
+          R.SPOKE_CONFIGURATOR_UNPAUSE_UNFREEZE_ROLE,
+          R.SPOKE_CONFIGURATOR_UNPAUSE_UNFREEZE_ROLE_LABEL
+        )
       )
     );
     vm.prank(Cash.OWNER_SAFE);
@@ -174,8 +177,18 @@ contract EtherfiCashTimelockForkTest is Test {
 
     vm.prank(Cash.TIMELOCK_SAFE);
     tl.scheduleBatch(t, v, p, bytes32(0), keccak256('early'), Timelock.MIN_DELAY);
+    vm.prank(Cash.TIMELOCK_SAFE);
     vm.expectRevert();
     tl.executeBatch(t, v, p, bytes32(0), keccak256('early'));
+
+    // execution is closed: only the Timelock Safe holds EXECUTOR_ROLE (address(0) seat revoked)
+    assertFalse(tl.hasRole(Timelock.EXECUTOR_ROLE, address(0)), 'open executor revoked');
+    assertTrue(tl.hasRole(Timelock.EXECUTOR_ROLE, Cash.TIMELOCK_SAFE), 'Timelock Safe executor');
+    assertFalse(tl.hasRole(Timelock.EXECUTOR_ROLE, Cash.OWNER_SAFE), 'Admin Safe not executor');
+    assertFalse(
+      tl.hasRole(Timelock.EXECUTOR_ROLE, Cash.OPERATOR_SAFE),
+      'Operator Safe not executor'
+    );
   }
 
   // ─── helpers ───
@@ -186,9 +199,15 @@ contract EtherfiCashTimelockForkTest is Test {
 
   /// @dev Runs configure(), asserts the phase, then either executes the batch it wrote (from the
   /// signer it names, or a random account when execution is open) or, if it wrote nothing because
-  /// an operation is maturing, lets 24h pass.
+  /// an operation is maturing, lets 24h pass. An [also] batch written for the same step is executed
+  /// right after, from its own signer. Every batch written for the Timelock Safe (schedules, and
+  /// executes once the open seat is revoked) is first proven to revert from anyone else.
+  /// Steps whose phase is already behind the live chain (executed on mainnet since) are skipped,
+  /// so the rehearsal keeps working as the real migration progresses.
   function _step(EtherfiCashTimelockScript.Phase expected) internal {
-    assertEq(uint256(script.configure()), uint256(expected), 'configure() phase');
+    EtherfiCashTimelockScript.Phase actual = script.configure();
+    if (actual > expected) return;
+    assertEq(uint256(actual), uint256(expected), 'configure() phase');
     (string memory path, address signer) = script.lastEmitted();
     if (bytes(path).length == 0) {
       if (
@@ -197,7 +216,37 @@ contract EtherfiCashTimelockForkTest is Test {
       ) vm.warp(block.timestamp + Timelock.MIN_DELAY);
       return;
     }
+    _sendAsSigner(path, signer);
+    (path, signer) = script.alsoEmitted();
+    if (bytes(path).length != 0) _sendAsSigner(path, signer);
+  }
+
+  /// @dev Sends a written batch from `signer` (a random account when open); Timelock Safe batches
+  /// are first proven to revert from anyone else.
+  function _sendAsSigner(string memory path, address signer) internal {
+    if (signer == Cash.TIMELOCK_SAFE) {
+      _expectBatchFileReverts(path, makeAddr('anyone'));
+      _expectBatchFileReverts(path, Cash.OWNER_SAFE);
+      _expectBatchFileReverts(path, Cash.OPERATOR_SAFE);
+    }
     _executeBatchFile(path, signer == address(0) ? makeAddr('anyone') : signer);
+  }
+
+  /// @dev Every transaction of a written batch reverts when sent by `sender`.
+  function _expectBatchFileReverts(string memory path, address sender) internal {
+    string memory json = vm.readFile(path);
+    for (uint256 i; ; i++) {
+      string memory key = string.concat('.transactions[', vm.toString(i), ']');
+      if (!vm.keyExistsJson(json, key)) break;
+      address to = vm.parseJsonAddress(json, string.concat(key, '.to'));
+      bytes memory data = vm.parseJsonBytes(json, string.concat(key, '.data'));
+      vm.prank(sender);
+      (bool ok, ) = to.call(data);
+      assertFalse(
+        ok,
+        string.concat('tx ', vm.toString(i), ' of ', path, ' must revert for sender')
+      );
+    }
   }
 
   /// @dev Replays a written Safe Transaction Builder JSON: every transaction, from `sender`.
@@ -218,7 +267,7 @@ contract EtherfiCashTimelockForkTest is Test {
     }
   }
 
-  /// @dev Timelock Safe schedules, 24h pass, anyone executes.
+  /// @dev Timelock Safe schedules, 24h pass, nobody else can execute, the Timelock Safe does.
   function _throughTimelock(address target, bytes memory data, string memory tag) internal {
     TimelockController tl = TimelockController(payable(timelock));
     (address[] memory t, uint256[] memory v, bytes[] memory p) = _single(target, data);
@@ -227,6 +276,12 @@ contract EtherfiCashTimelockForkTest is Test {
     tl.scheduleBatch(t, v, p, bytes32(0), salt, Timelock.MIN_DELAY);
     vm.warp(block.timestamp + Timelock.MIN_DELAY);
     vm.prank(makeAddr('anyone'));
+    vm.expectRevert();
+    tl.executeBatch(t, v, p, bytes32(0), salt);
+    vm.prank(Cash.OWNER_SAFE);
+    vm.expectRevert();
+    tl.executeBatch(t, v, p, bytes32(0), salt);
+    vm.prank(Cash.TIMELOCK_SAFE);
     tl.executeBatch(t, v, p, bytes32(0), salt);
   }
 

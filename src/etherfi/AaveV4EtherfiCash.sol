@@ -193,8 +193,11 @@ library AaveV4EtherfiCashCaps {
 /// the address-book upstream — governance configuration only.
 library AaveV4EtherfiCashTimelock {
   uint256 internal constant MIN_DELAY = 24 hours; // 86400
-  /// @dev address(0) executor = OPEN execution: anyone may execute a matured operation; safety
-  /// comes from the delay and the cancellers. Use TIMELOCK_SAFE for a signature at execution.
+  /// @dev Constructor executor. address(0) = OPEN execution at deployment, so the first
+  /// scheduled operation (phase 1b-i) can be executed by anyone; that operation seats
+  /// TIMELOCK_SAFE as the only EXECUTOR and revokes the open seat, so every later matured
+  /// operation (starting with phase 1b-ii) needs a Timelock Safe signature to execute (the delay
+  /// and the cancellers still guard the queue).
   address internal constant EXECUTOR = address(0);
   /// @dev no external admin: the timelock administers its own roles behind the delay
   address internal constant ADMIN = address(0);
@@ -202,8 +205,13 @@ library AaveV4EtherfiCashTimelock {
   bytes32 internal constant SALT = keccak256('ETHERFI_CASH_AAVE_V4_TIMELOCK_V1');
   /// @dev keccak256('CANCELLER_ROLE') = 0xfd643c72710c63c0180259aba6b2d05451e3591a24e58b62239378085726f783
   bytes32 internal constant CANCELLER_ROLE = keccak256('CANCELLER_ROLE');
+  /// @dev keccak256('EXECUTOR_ROLE') = 0xd8aa0f3194971a2a116679f7c2090f6939c8d4e01a2a8d7e41d55e5351469e63
+  bytes32 internal constant EXECUTOR_ROLE = keccak256('EXECUTOR_ROLE');
 
   // salts of the migration's scheduled operations (deterministic ids let the script track them)
+  /// @dev phase 1b-i: EXECUTOR_ROLE to TIMELOCK_SAFE, open EXECUTOR seat (address(0)) revoked
+  bytes32 internal constant OP_SALT_EXECUTOR = keccak256('ETHERFI_CASH_TIMELOCK_OP_EXECUTOR_V1');
+  /// @dev phase 1b-ii: CANCELLER_ROLE to the Admin + Operator Safes (first Timelock-Safe-only execute)
   bytes32 internal constant OP_SALT_CANCELLERS =
     keccak256('ETHERFI_CASH_TIMELOCK_OP_CANCELLERS_V1');
   bytes32 internal constant OP_SALT_DRY_RUN = keccak256('ETHERFI_CASH_TIMELOCK_OP_DRY_RUN_V1');
@@ -223,17 +231,17 @@ library AaveV4EtherfiCashRoles {
   uint64 internal constant HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE = 200; // Roles.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE
   uint64 internal constant HUB_RISK_CURATOR_ROLE = 201; // EtherfiCashLaunchPayload
   uint64 internal constant HUB_GUARDIAN_ROLE = 202; // EtherfiCashLaunchPayload
-  uint64 internal constant HUB_CONFIGURATOR_SPOKE_HALTED_ROLE = 203; // timelock migration: un-halt spokes (Admin Safe)
+  uint64 internal constant HUB_CONFIGURATOR_SPOKE_UNHALT_ROLE = 203; // timelock migration: restart path — updateSpokeHalted (Admin Safe); guardians keep the one-way haltSpoke/haltAsset
   uint64 internal constant SPOKE_USER_POSITION_UPDATER_ROLE = 302; // Roles.SPOKE_USER_POSITION_UPDATER_ROLE
   uint64 internal constant SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE = 400; // Roles.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE
   uint64 internal constant SPOKE_RISK_CURATOR_ROLE = 401; // EtherfiCashLaunchPayload
   uint64 internal constant SPOKE_GUARDIAN_ROLE = 402; // EtherfiCashLaunchPayload
-  uint64 internal constant SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE = 403; // timelock migration: un-pause / un-freeze reserves (Admin Safe)
+  uint64 internal constant SPOKE_CONFIGURATOR_UNPAUSE_UNFREEZE_ROLE = 403; // timelock migration: restart path — updatePaused/updateFrozen (Admin Safe); guardians keep the one-way pause*/freeze*
 
-  string internal constant HUB_CONFIGURATOR_SPOKE_HALTED_ROLE_LABEL =
-    'HUB_CONFIGURATOR_SPOKE_HALTED_ROLE';
-  string internal constant SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE_LABEL =
-    'SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE';
+  string internal constant HUB_CONFIGURATOR_SPOKE_UNHALT_ROLE_LABEL =
+    'HUB_CONFIGURATOR_SPOKE_UNHALT_ROLE';
+  string internal constant SPOKE_CONFIGURATOR_UNPAUSE_UNFREEZE_ROLE_LABEL =
+    'SPOKE_CONFIGURATOR_UNPAUSE_UNFREEZE_ROLE';
 
   /// @dev 22 HubConfigurator + 24 SpokeConfigurator selectors (Roles.sol); the whole map is read back
   uint256 internal constant CONFIGURATOR_SELECTOR_COUNT = 46;

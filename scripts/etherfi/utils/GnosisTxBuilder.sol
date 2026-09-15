@@ -56,7 +56,7 @@ library GnosisTxBuilder {
         vm.toString(txs[i].value),
         '",\n      "data": "',
         vm.toString(txs[i].data),
-        '",\n      "contractMethod": null,\n      "contractInputsValues": null\n    }'
+        '"\n    }'
       );
     }
     return

@@ -28,8 +28,13 @@ import {IAaveV4ConfigEngine} from 'src/config-engine/interfaces/IAaveV4ConfigEng
 ///
 ///   deploy()    phase 1a — deterministic EtherFiTimelock deployment (any funded key).
 ///   configure() phases 1b-5 — read-only; verifies every completed phase and writes the next
-///               Safe batch to output/etherfi/timelock/. Re-run after each Safe execution or
-///               timelock maturity until it returns COMPLETE.
+///               Safe batch to output/etherfi/timelock/ ([next]). For timelock operations it also
+///               pre-writes the execute batch as soon as the schedule batch exists ([prep]), so it
+///               can be reviewed and queued in the Safe before the delay elapses. A batch that does
+///               not depend on [next] and may be sent at the same time by its own signer is written
+///               as [also] (phase 3's schedule goes out with phase 2, so the 24h delay overlaps the
+///               Admin Safe's signing). Re-run after each Safe execution or timelock maturity until
+///               it returns COMPLETE.
 ///
 ///   forge script scripts/etherfi/timelock/EtherfiCashTimelock.s.sol --sig 'deploy()' \
 ///     --rpc-url optimism --account <keystore> --sender <address> --slow --broadcast --verify
@@ -38,6 +43,7 @@ import {IAaveV4ConfigEngine} from 'src/config-engine/interfaces/IAaveV4ConfigEng
 contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
   enum Phase {
     DEPLOY,
+    EXECUTOR,
     CANCELLERS,
     ACCESS_MANAGER,
     DRY_RUN,
@@ -51,6 +57,14 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
   error PinnedAddressMismatch(string name, address pinned, address actual);
   error DeployedAddressMismatch(address deployed, address predicted);
   error BytecodeMismatch(address timelock);
+
+  function run() external {
+    vm.startBroadcast(vm.envUint('PRIVATE_KEY'));
+    address(0xbaCa0cD6B69Eef3257e2D122b22ddEE8AeE5e283).call(
+      hex'e38335e500000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001600000000000000000000000000000000000000000000000000000000000000000eb819b245cbf5981f8591b6a1832b56d855f1a0fb9208df8bb2daf88cea84b650000000000000000000000000000000000000000000000000000000000000002000000000000000000000000baca0cd6b69eef3257e2d122b22ddee8aee5e283000000000000000000000000baca0cd6b69eef3257e2d122b22ddee8aee5e2830000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000000000000000000000000000000000000000000442f2ff15dd8aa0f3194971a2a116679f7c2090f6939c8d4e01a2a8d7e41d55e5351469e63000000000000000000000000d442635bc9bf83e21bba8b65e224f5db6a011166000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000044d547741fd8aa0f3194971a2a116679f7c2090f6939c8d4e01a2a8d7e41d55e5351469e63000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+    );
+    vm.stopBroadcast();
+  }
 
   function deploy() external returns (address timelock) {
     _requireOpMainnet();
@@ -66,39 +80,74 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     } else {
       console2.log('EtherFiTimelock already deployed at:', timelock, '- verifying only');
     }
-    _verifyTimelock(timelock, broadcaster);
-    if (Cash.TIMELOCK == address(0))
+    _verifyTimelock(timelock, broadcaster, _executorSeated(timelock), _cancellersGranted(timelock));
+    if (Cash.TIMELOCK == address(0)) {
       console2.log('ACTION: pin AaveV4EtherfiCash.TIMELOCK =', timelock);
+    }
   }
 
   function configure() external returns (Phase) {
     _requireOpMainnet();
+    delete alsoEmitted;
     address timelock = _timelockAddress();
     if (timelock.code.length == 0) return _pending(Phase.DEPLOY, 'no timelock code: run deploy()');
-    _verifyTimelock(timelock, address(0));
+    bool executorSeated = _executorSeated(timelock);
+    bool cancellersGranted = _cancellersGranted(timelock);
+    _verifyTimelock(timelock, address(0), executorSeated, cancellersGranted);
     _done('phase 1a: timelock deployed + verified');
 
-    // phase 1b — Timelock Safe schedules, anyone executes after 24h
-    GnosisTxBuilder.Tx[] memory txs = new GnosisTxBuilder.Tx[](2);
-    txs[0] = _timelockGrantRole(timelock, Timelock.CANCELLER_ROLE, Cash.OWNER_SAFE);
-    txs[1] = _timelockGrantRole(timelock, Timelock.CANCELLER_ROLE, Cash.OPERATOR_SAFE);
-    if (!_cancellersGranted(timelock))
+    // phase 1b — the Timelock Safe schedules two operations in one MultiSend; after 24h they are
+    // executed one at a time, in this order:
+    //   1b-i  executor op: seats the Timelock Safe as the only EXECUTOR and revokes the open
+    //         address(0) seat. Executed under open execution — the last time anyone may execute.
+    //   1b-ii cancellers op: CANCELLER_ROLE to the Admin + Operator Safes. Only the Timelock
+    //         Safe can execute it now, which proves the executor seat live before anything else
+    //         goes through the queue.
+    GnosisTxBuilder.Tx[] memory executorOp = new GnosisTxBuilder.Tx[](2);
+    executorOp[0] = _timelockGrantRole(timelock, Timelock.EXECUTOR_ROLE, Cash.TIMELOCK_SAFE);
+    executorOp[1] = _timelockRevokeRole(timelock, Timelock.EXECUTOR_ROLE, Timelock.EXECUTOR);
+    GnosisTxBuilder.Tx[] memory cancellersOp = new GnosisTxBuilder.Tx[](2);
+    cancellersOp[0] = _timelockGrantRole(timelock, Timelock.CANCELLER_ROLE, Cash.OWNER_SAFE);
+    cancellersOp[1] = _timelockGrantRole(timelock, Timelock.CANCELLER_ROLE, Cash.OPERATOR_SAFE);
+    if (!executorSeated || !cancellersGranted) {
+      bool executorScheduled = _isOperation(timelock, Timelock.OP_SALT_EXECUTOR, executorOp);
+      bool cancellersScheduled = _isOperation(timelock, Timelock.OP_SALT_CANCELLERS, cancellersOp);
+      if (!executorScheduled || !cancellersScheduled) {
+        return
+          _scheduleBoth(timelock, executorScheduled, executorOp, cancellersScheduled, cancellersOp);
+      }
+    }
+    if (!executorSeated) {
       return
-        _drive(Phase.CANCELLERS, timelock, 'phase1b-cancellers', Timelock.OP_SALT_CANCELLERS, txs);
-    _done('phase 1b: Admin Safe + Operator Safe hold CANCELLER_ROLE');
+        _drive(Phase.EXECUTOR, timelock, 'phase1b-executor', Timelock.OP_SALT_EXECUTOR, executorOp);
+    }
+    _done('phase 1b-i: Timelock Safe is the only EXECUTOR (open seat revoked)');
+    if (!cancellersGranted) {
+      return
+        _drive(
+          Phase.CANCELLERS,
+          timelock,
+          'phase1b-cancellers',
+          Timelock.OP_SALT_CANCELLERS,
+          cancellersOp
+        );
+    }
+    _done(
+      'phase 1b-ii: Admin Safe + Operator Safe hold CANCELLER_ROLE (Timelock-Safe-only execute)'
+    );
 
     // phase 2 — Admin Safe, one batch
     bool phase2Done = _hasRole(R.ADMIN_ROLE, timelock);
     bool adminRevoked = !_hasRole(R.ADMIN_ROLE, Cash.OWNER_SAFE);
     _verifyAccessManager(timelock, phase2Done, adminRevoked);
-    txs = new GnosisTxBuilder.Tx[](16);
+    GnosisTxBuilder.Tx[] memory txs = new GnosisTxBuilder.Tx[](16);
     txs[0] = _labelRole(
-      R.HUB_CONFIGURATOR_SPOKE_HALTED_ROLE,
-      R.HUB_CONFIGURATOR_SPOKE_HALTED_ROLE_LABEL
+      R.HUB_CONFIGURATOR_SPOKE_UNHALT_ROLE,
+      R.HUB_CONFIGURATOR_SPOKE_UNHALT_ROLE_LABEL
     );
     txs[1] = _labelRole(
-      R.SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE,
-      R.SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE_LABEL
+      R.SPOKE_CONFIGURATOR_UNPAUSE_UNFREEZE_ROLE,
+      R.SPOKE_CONFIGURATOR_UNPAUSE_UNFREEZE_ROLE_LABEL
     );
     txs[2] = _setTargetFunctionRole(
       Cash.HUB_CONFIGURATOR,
@@ -108,7 +157,7 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     txs[3] = _setTargetFunctionRole(
       Cash.HUB_CONFIGURATOR,
       _sel(IHubConfigurator.updateSpokeHalted.selector),
-      R.HUB_CONFIGURATOR_SPOKE_HALTED_ROLE
+      R.HUB_CONFIGURATOR_SPOKE_UNHALT_ROLE
     );
     txs[4] = _setTargetFunctionRole(
       Cash.SPOKE_CONFIGURATOR,
@@ -118,15 +167,15 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     txs[5] = _setTargetFunctionRole(
       Cash.SPOKE_CONFIGURATOR,
       _sel(ISpokeConfigurator.updatePaused.selector, ISpokeConfigurator.updateFrozen.selector),
-      R.SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE
+      R.SPOKE_CONFIGURATOR_UNPAUSE_UNFREEZE_ROLE
     );
     txs[6] = _setTargetFunctionRole(
       Cash.SPOKE_CONFIGURATOR,
       _sel(ISpokeConfigurator.updateLiquidationConfig.selector),
       R.SPOKE_RISK_CURATOR_ROLE
     );
-    txs[7] = _grantRole(R.HUB_CONFIGURATOR_SPOKE_HALTED_ROLE, Cash.OWNER_SAFE);
-    txs[8] = _grantRole(R.SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE, Cash.OWNER_SAFE);
+    txs[7] = _grantRole(R.HUB_CONFIGURATOR_SPOKE_UNHALT_ROLE, Cash.OWNER_SAFE);
+    txs[8] = _grantRole(R.SPOKE_CONFIGURATOR_UNPAUSE_UNFREEZE_ROLE, Cash.OWNER_SAFE);
     txs[9] = _grantRole(R.ADMIN_ROLE, timelock);
     txs[10] = _grantRole(R.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE, timelock);
     txs[11] = _grantRole(R.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE, timelock);
@@ -134,15 +183,35 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     txs[13] = _grantRole(R.SPOKE_USER_POSITION_UPDATER_ROLE, timelock);
     txs[14] = _setRoleGuardian(R.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE, R.HUB_GUARDIAN_ROLE);
     txs[15] = _setRoleGuardian(R.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE, R.SPOKE_GUARDIAN_ROLE);
-    if (!phase2Done) return _emit(Phase.ACCESS_MANAGER, 'phase2-admin-safe-access-manager', txs);
-    _done('phase 2: AccessManager batch applied');
 
     // phase 3 — no-op through the queue (proves timelock -> AccessManager root). Re-sets a phase-2
     // value: AccessManager refuses to relabel a role (AccessManagerRoleAlreadyLabeled)
-    txs = new GnosisTxBuilder.Tx[](1);
-    txs[0] = _setRoleGuardian(R.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE, R.HUB_GUARDIAN_ROLE);
-    if (!_isOperationDone(timelock, Timelock.OP_SALT_DRY_RUN, txs))
-      return _drive(Phase.DRY_RUN, timelock, 'phase3-dry-run', Timelock.OP_SALT_DRY_RUN, txs);
+    GnosisTxBuilder.Tx[] memory dryRun = new GnosisTxBuilder.Tx[](1);
+    dryRun[0] = _setRoleGuardian(R.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE, R.HUB_GUARDIAN_ROLE);
+
+    if (!phase2Done) {
+      _emitBatch(Cash.OWNER_SAFE, 'phase2-admin-safe-access-manager', txs);
+      // The phase 3 schedule only needs the Timelock Safe's PROPOSER seat, so it goes out with
+      // phase 2 and the 24h delay runs while the Admin Safe signs. Its execute stays [prep]: it
+      // needs phase 2 applied (timelock = AccessManager admin) and is gated below.
+      if (!_isOperation(timelock, Timelock.OP_SALT_DRY_RUN, dryRun)) {
+        _emitScheduleAlongside(
+          timelock,
+          Cash.TIMELOCK_SAFE,
+          Cash.TIMELOCK_SAFE,
+          'phase3-dry-run',
+          Timelock.OP_SALT_DRY_RUN,
+          Timelock.MIN_DELAY,
+          dryRun
+        );
+      }
+      return Phase.ACCESS_MANAGER;
+    }
+    _done('phase 2: AccessManager batch applied');
+
+    if (!_isOperationDone(timelock, Timelock.OP_SALT_DRY_RUN, dryRun)) {
+      return _drive(Phase.DRY_RUN, timelock, 'phase3-dry-run', Timelock.OP_SALT_DRY_RUN, dryRun);
+    }
     _done('phase 3: dry run executed through the timelock');
 
     // phase 4 — Admin Safe, one batch; TreasurySpoke is two-step so the timelock accepts via the queue
@@ -159,7 +228,7 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
 
     txs = new GnosisTxBuilder.Tx[](1);
     txs[0] = _acceptOwnership(Spokes.TREASURY_SPOKE);
-    if (!treasuryAccepted)
+    if (!treasuryAccepted) {
       return
         _drive(
           Phase.TREASURY_ACCEPT,
@@ -168,6 +237,7 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
           Timelock.OP_SALT_TREASURY_ACCEPT,
           txs
         );
+    }
     _done('phase 4b: TreasurySpoke owned by the timelock');
 
     // phase 5 — Admin Safe, one batch; root admin last. POINT OF NO RETURN
@@ -201,7 +271,11 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
       );
   }
 
-  /// @dev Predicted CREATE2 address (Safe Singleton Factory); asserted against the pin once set.
+  /// @notice Predicted CREATE2 address (Safe Singleton Factory); asserted against the pin once set.
+  function timelockAddress() external pure returns (address) {
+    return _timelockAddress();
+  }
+
   function _timelockAddress() internal pure returns (address predicted) {
     require(Cash.TIMELOCK_SAFE != address(0), StagedConstant('TIMELOCK_SAFE'));
     predicted = Create2Utils.computeCreate2Address(Timelock.SALT, _timelockInitCode());
@@ -212,7 +286,14 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
   }
 
   /// @dev Exact runtime code + every role seat; `broadcaster` (if given) must hold nothing.
-  function _verifyTimelock(address timelock, address broadcaster) internal {
+  /// @param executorSeated after phase 1b-i: Timelock Safe sole EXECUTOR, open seat revoked
+  /// @param cancellersGranted after phase 1b-ii: Admin + Operator Safes CANCELLER
+  function _verifyTimelock(
+    address timelock,
+    address broadcaster,
+    bool executorSeated,
+    bool cancellersGranted
+  ) internal {
     require(
       keccak256(timelock.code) == keccak256(type(EtherFiTimelock).runtimeCode),
       BytecodeMismatch(timelock)
@@ -224,24 +305,59 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     bytes32 admin = tl.DEFAULT_ADMIN_ROLE();
 
     _check('CANCELLER_ROLE constant', uint256(canceller), uint256(Timelock.CANCELLER_ROLE));
+    _check('EXECUTOR_ROLE constant', uint256(executor), uint256(Timelock.EXECUTOR_ROLE));
     _check('timelock.minDelay', tl.getMinDelay(), Timelock.MIN_DELAY);
+    _checkBool('timelock is its own ADMIN', tl.hasRole(admin, timelock), true);
+    // Timelock Safe: proposer + canceller from the constructor, executor from phase 1b-i
     _checkBool('Timelock Safe is PROPOSER', tl.hasRole(proposer, Cash.TIMELOCK_SAFE), true);
     _checkBool('Timelock Safe is CANCELLER', tl.hasRole(canceller, Cash.TIMELOCK_SAFE), true);
-    _checkBool('open EXECUTOR (address(0))', tl.hasRole(executor, Timelock.EXECUTOR), true);
-    _checkBool('timelock is its own ADMIN', tl.hasRole(admin, timelock), true);
+    _checkBool(
+      'Timelock Safe is EXECUTOR',
+      tl.hasRole(executor, Cash.TIMELOCK_SAFE),
+      executorSeated
+    );
     _checkBool('Timelock Safe is not ADMIN', tl.hasRole(admin, Cash.TIMELOCK_SAFE), false);
+    // open execution (address(0)) only until phase 1b-i revokes it
+    _checkBool(
+      'open EXECUTOR (address(0))',
+      tl.hasRole(executor, Timelock.EXECUTOR),
+      !executorSeated
+    );
+    // Admin Safe + Operator Safe: cancellers from phase 1b-ii, nothing else ever
+    _checkBool(
+      'Admin Safe is CANCELLER',
+      tl.hasRole(canceller, Cash.OWNER_SAFE),
+      cancellersGranted
+    );
     _checkBool('Admin Safe is not PROPOSER', tl.hasRole(proposer, Cash.OWNER_SAFE), false);
+    _checkBool('Admin Safe is not EXECUTOR', tl.hasRole(executor, Cash.OWNER_SAFE), false);
     _checkBool('Admin Safe is not ADMIN', tl.hasRole(admin, Cash.OWNER_SAFE), false);
+    _checkBool(
+      'Operator Safe is CANCELLER',
+      tl.hasRole(canceller, Cash.OPERATOR_SAFE),
+      cancellersGranted
+    );
     _checkBool('Operator Safe is not PROPOSER', tl.hasRole(proposer, Cash.OPERATOR_SAFE), false);
+    _checkBool('Operator Safe is not EXECUTOR', tl.hasRole(executor, Cash.OPERATOR_SAFE), false);
     _checkBool('Operator Safe is not ADMIN', tl.hasRole(admin, Cash.OPERATOR_SAFE), false);
     if (broadcaster != address(0)) {
       _checkBool('deployer is not PROPOSER', tl.hasRole(proposer, broadcaster), false);
       _checkBool('deployer is not CANCELLER', tl.hasRole(canceller, broadcaster), false);
+      _checkBool('deployer is not EXECUTOR', tl.hasRole(executor, broadcaster), false);
       _checkBool('deployer is not ADMIN', tl.hasRole(admin, broadcaster), false);
     }
     _assertNoMismatches('timelock configuration');
   }
 
+  /// @dev Phase 1b-i applied: the Timelock Safe executes, the open seat is gone.
+  function _executorSeated(address timelock) internal view returns (bool) {
+    TimelockController tl = TimelockController(payable(timelock));
+    return
+      tl.hasRole(Timelock.EXECUTOR_ROLE, Cash.TIMELOCK_SAFE) &&
+      !tl.hasRole(Timelock.EXECUTOR_ROLE, Timelock.EXECUTOR);
+  }
+
+  /// @dev Phase 1b-ii applied: both Safes can cancel.
   function _cancellersGranted(address timelock) internal view returns (bool) {
     TimelockController tl = TimelockController(payable(timelock));
     return
@@ -369,12 +485,12 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
       R.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE,
       R.HUB_RISK_CURATOR_ROLE,
       R.HUB_GUARDIAN_ROLE,
-      R.HUB_CONFIGURATOR_SPOKE_HALTED_ROLE,
+      R.HUB_CONFIGURATOR_SPOKE_UNHALT_ROLE,
       R.SPOKE_USER_POSITION_UPDATER_ROLE,
       R.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE,
       R.SPOKE_RISK_CURATOR_ROLE,
       R.SPOKE_GUARDIAN_ROLE,
-      R.SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE
+      R.SPOKE_CONFIGURATOR_UNPAUSE_UNFREEZE_ROLE
     ];
     for (uint256 i; i < roles.length; i++) {
       uint64 role = roles[i];
@@ -383,8 +499,8 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
         role == R.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE ||
         role == R.HUB_DEFICIT_ELIMINATOR_ROLE ||
         role == R.SPOKE_USER_POSITION_UPDATER_ROLE;
-      bool restart = role == R.HUB_CONFIGURATOR_SPOKE_HALTED_ROLE ||
-        role == R.SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE;
+      bool restart = role == R.HUB_CONFIGURATOR_SPOKE_UNHALT_ROLE ||
+        role == R.SPOKE_CONFIGURATOR_UNPAUSE_UNFREEZE_ROLE;
       bool curator = role == R.HUB_RISK_CURATOR_ROLE || role == R.SPOKE_RISK_CURATOR_ROLE;
       bool guardian = role == R.HUB_GUARDIAN_ROLE || role == R.SPOKE_GUARDIAN_ROLE;
 
@@ -450,22 +566,26 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     bool migrated
   ) internal pure returns (uint64) {
     if (migrated && target == Cash.HUB_CONFIGURATOR) {
-      if (selector == IHubConfigurator.updateLiquidityFee.selector)
+      if (selector == IHubConfigurator.updateLiquidityFee.selector) {
         return R.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE;
-      if (selector == IHubConfigurator.updateSpokeHalted.selector)
-        return R.HUB_CONFIGURATOR_SPOKE_HALTED_ROLE;
+      }
+      if (selector == IHubConfigurator.updateSpokeHalted.selector) {
+        return R.HUB_CONFIGURATOR_SPOKE_UNHALT_ROLE;
+      }
     }
     if (migrated && target == Cash.SPOKE_CONFIGURATOR) {
-      if (selector == ISpokeConfigurator.updateBorrowable.selector)
+      if (selector == ISpokeConfigurator.updateBorrowable.selector) {
         return R.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE;
+      }
       if (
         selector == ISpokeConfigurator.updatePaused.selector ||
         selector == ISpokeConfigurator.updateFrozen.selector
       ) {
-        return R.SPOKE_CONFIGURATOR_PAUSE_FREEZE_ROLE;
+        return R.SPOKE_CONFIGURATOR_UNPAUSE_UNFREEZE_ROLE;
       }
-      if (selector == ISpokeConfigurator.updateLiquidationConfig.selector)
+      if (selector == ISpokeConfigurator.updateLiquidationConfig.selector) {
         return R.SPOKE_RISK_CURATOR_ROLE;
+      }
     }
     for (uint256 i; i < launch.length; i++) {
       if (launch[i].target != target) continue;
@@ -492,6 +612,53 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     return phase;
   }
 
+  /// @dev Phase 1b schedule: one Timelock Safe MultiSend with a `scheduleBatch` per operation
+  /// not yet on the queue (both, normally).
+  function _scheduleBoth(
+    address timelock,
+    bool executorScheduled,
+    GnosisTxBuilder.Tx[] memory executorOp,
+    bool cancellersScheduled,
+    GnosisTxBuilder.Tx[] memory cancellersOp
+  ) internal returns (Phase) {
+    uint256 n = (executorScheduled ? 0 : 1) + (cancellersScheduled ? 0 : 1);
+    bytes32[] memory salts = new bytes32[](n);
+    GnosisTxBuilder.Tx[][] memory ops = new GnosisTxBuilder.Tx[][](n);
+    uint256 i;
+    if (!executorScheduled) {
+      salts[i] = Timelock.OP_SALT_EXECUTOR;
+      ops[i++] = executorOp;
+    }
+    if (!cancellersScheduled) {
+      salts[i] = Timelock.OP_SALT_CANCELLERS;
+      ops[i] = cancellersOp;
+    }
+    _emitSchedules(
+      timelock,
+      Cash.TIMELOCK_SAFE,
+      'phase1b-timelock-roles',
+      salts,
+      Timelock.MIN_DELAY,
+      ops
+    );
+    // execute batches ahead of time, in execution order
+    _previewExecute(
+      timelock,
+      Cash.TIMELOCK_SAFE,
+      'phase1b-executor',
+      Timelock.OP_SALT_EXECUTOR,
+      executorOp
+    );
+    _previewExecute(
+      timelock,
+      Cash.TIMELOCK_SAFE,
+      'phase1b-cancellers',
+      Timelock.OP_SALT_CANCELLERS,
+      cancellersOp
+    );
+    return Phase.EXECUTOR;
+  }
+
   function _drive(
     Phase phase,
     address timelock,
@@ -499,7 +666,15 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     bytes32 salt,
     GnosisTxBuilder.Tx[] memory txs
   ) internal returns (Phase) {
-    _driveOperation(timelock, Cash.TIMELOCK_SAFE, name, salt, Timelock.MIN_DELAY, txs);
+    _driveOperation(
+      timelock,
+      Cash.TIMELOCK_SAFE,
+      Cash.TIMELOCK_SAFE,
+      name,
+      salt,
+      Timelock.MIN_DELAY,
+      txs
+    );
     return phase;
   }
 
