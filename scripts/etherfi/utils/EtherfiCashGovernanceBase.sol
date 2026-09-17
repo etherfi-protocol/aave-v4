@@ -15,6 +15,9 @@ import {IAccessControl} from 'src/dependencies/openzeppelin/IAccessControl.sol';
 import {IAccessManager} from 'src/dependencies/openzeppelin/IAccessManager.sol';
 import {Ownable} from 'src/dependencies/openzeppelin/Ownable.sol';
 import {Ownable2StepUpgradeable} from 'src/dependencies/openzeppelin-upgradeable/Ownable2StepUpgradeable.sol';
+import {IHubConfigurator} from 'src/hub/interfaces/IHubConfigurator.sol';
+import {ISpokeConfigurator} from 'src/spoke/interfaces/ISpokeConfigurator.sol';
+import {IAssetInterestRateStrategy} from 'src/hub/interfaces/IAssetInterestRateStrategy.sol';
 
 /// @title EtherfiCashGovernanceBase
 /// @notice Reusable plumbing for every ether.fi Cash governance script (Safe batches, timelock
@@ -24,6 +27,10 @@ import {Ownable2StepUpgradeable} from 'src/dependencies/openzeppelin-upgradeable
 ///     AccessManager calls as Safe transactions with a readable note
 ///   - `_transferOwnership`, `_acceptOwnership`, `_timelockGrantRole`, `_timelockRevokeRole`:
 ///     Ownable / AccessControl calls
+///   - `_updateInterestRateData`, `_updateLiquidityFee`, `_updateSpokeDrawCap`, `_updateBorrowable`:
+///     HubConfigurator / SpokeConfigurator parameter calls
+///   - `_canCall` / `_requireCanCall`: may a Safe send these calls right now (AccessManager)
+///   - `_plan`: re-run a script's `configure()` and apply what it writes in this VM until COMPLETE
 ///   - `_emitBatch`: write a Safe Transaction Builder batch (+ .md twin), remembered in `lastEmitted`
 ///   - `_writeBatch` / `_previewExecute`: write a batch that is not the next step (execute batches
 ///     of operations still maturing, so signers can review and queue them early)
@@ -40,18 +47,28 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
     address signer;
   }
 
-  string internal constant OUTPUT_DIR = 'output/etherfi/timelock/';
+  /// @dev Where the batches go; a script writes its own folder by overriding this.
+  function _outputDir() internal pure virtual returns (string memory) {
+    return 'output/etherfi/timelock/';
+  }
+
   /// @dev keccak256('eip1967.proxy.admin') - 1
   bytes32 internal constant EIP1967_ADMIN_SLOT =
     0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103;
 
   error Mismatches(string what, uint256 count);
   error NotExecutor(address timelock, address executor);
+  error NoSigner(string note);
+  error PlanDidNotConverge(uint256 steps);
 
   Emitted public lastEmitted;
   /// @notice A second batch written for the same step that does not depend on `lastEmitted` and
   /// may be sent at the same time, by its own signer (empty path when there is none).
   Emitted public alsoEmitted;
+  /// @dev The transactions behind `lastEmitted` / `alsoEmitted`, kept so a plan run can apply
+  /// them in this VM without reading the files back.
+  GnosisTxBuilder.Tx[] internal lastEmittedTxs;
+  GnosisTxBuilder.Tx[] internal alsoEmittedTxs;
   uint256 internal mismatches;
 
   // ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -191,6 +208,99 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
       );
   }
 
+  function _updateInterestRateData(
+    address hub,
+    uint256 assetId,
+    IAssetInterestRateStrategy.InterestRateData memory irData
+  ) internal pure returns (GnosisTxBuilder.Tx memory) {
+    return
+      _tx(
+        Cash.HUB_CONFIGURATOR,
+        abi.encodeCall(IHubConfigurator.updateInterestRateData, (hub, assetId, abi.encode(irData))),
+        string.concat(
+          'HubConfigurator.updateInterestRateData(',
+          _name(hub),
+          ', ',
+          vm.toString(assetId),
+          ', {optimalUsageRatio: ',
+          vm.toString(irData.optimalUsageRatio),
+          ', baseDrawnRate: ',
+          vm.toString(irData.baseDrawnRate),
+          ', rateGrowthBeforeOptimal: ',
+          vm.toString(irData.rateGrowthBeforeOptimal),
+          ', rateGrowthAfterOptimal: ',
+          vm.toString(irData.rateGrowthAfterOptimal),
+          '})'
+        )
+      );
+  }
+
+  function _updateLiquidityFee(
+    address hub,
+    uint256 assetId,
+    uint256 liquidityFee
+  ) internal pure returns (GnosisTxBuilder.Tx memory) {
+    return
+      _tx(
+        Cash.HUB_CONFIGURATOR,
+        abi.encodeCall(IHubConfigurator.updateLiquidityFee, (hub, assetId, liquidityFee)),
+        string.concat(
+          'HubConfigurator.updateLiquidityFee(',
+          _name(hub),
+          ', ',
+          vm.toString(assetId),
+          ', ',
+          vm.toString(liquidityFee),
+          ')'
+        )
+      );
+  }
+
+  function _updateSpokeDrawCap(
+    address hub,
+    uint256 assetId,
+    address spoke,
+    uint256 drawCap
+  ) internal pure returns (GnosisTxBuilder.Tx memory) {
+    return
+      _tx(
+        Cash.HUB_CONFIGURATOR,
+        abi.encodeCall(IHubConfigurator.updateSpokeDrawCap, (hub, assetId, spoke, drawCap)),
+        string.concat(
+          'HubConfigurator.updateSpokeDrawCap(',
+          _name(hub),
+          ', ',
+          vm.toString(assetId),
+          ', ',
+          _name(spoke),
+          ', ',
+          vm.toString(drawCap),
+          ')'
+        )
+      );
+  }
+
+  function _updateBorrowable(
+    address spoke,
+    uint256 reserveId,
+    bool borrowable
+  ) internal pure returns (GnosisTxBuilder.Tx memory) {
+    return
+      _tx(
+        Cash.SPOKE_CONFIGURATOR,
+        abi.encodeCall(ISpokeConfigurator.updateBorrowable, (spoke, reserveId, borrowable)),
+        string.concat(
+          'SpokeConfigurator.updateBorrowable(',
+          _name(spoke),
+          ', ',
+          vm.toString(reserveId),
+          ', ',
+          borrowable ? 'true' : 'false',
+          ')'
+        )
+      );
+  }
+
   function _sel(bytes4 a) internal pure returns (bytes4[] memory s) {
     s = new bytes4[](1);
     s[0] = a;
@@ -225,6 +335,7 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
   function _emitBatch(address safe, string memory name, GnosisTxBuilder.Tx[] memory txs) internal {
     string memory path = _writeBatch(safe, name, txs);
     lastEmitted = Emitted({path: path, signer: safe});
+    _store(lastEmittedTxs, txs);
     console2.log('[next] wrote', path);
     console2.log('       signer:', safe);
     for (uint256 i; i < txs.length; i++) {
@@ -240,7 +351,7 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
   ) internal returns (string memory) {
     return
       GnosisTxBuilder.write(
-        OUTPUT_DIR,
+        _outputDir(),
         name,
         string.concat(vm.toString(txs.length), ' CALL transactions for ', vm.toString(safe)),
         safe,
@@ -270,7 +381,7 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
       _emitSchedule(timelock, proposer, name, salt, delay, txs);
       _previewExecute(timelock, executor, name, salt, txs);
     } else if (state == TimelockController.OperationState.Waiting) {
-      delete lastEmitted;
+      _clearNext();
       console2.log('[wait]', name, ': scheduled, executable at unix time', tl.getTimestamp(id));
       _previewExecute(timelock, executor, name, salt, txs);
     } else if (state == TimelockController.OperationState.Ready) {
@@ -331,6 +442,7 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
     one[0] = _scheduleCall(timelock, salt, delay, txs);
     string memory path = _writeBatch(proposer, string.concat(name, '-schedule'), one);
     alsoEmitted = Emitted({path: path, signer: proposer});
+    _store(alsoEmittedTxs, one);
     console2.log('[also] wrote', path);
     console2.log('       signer:', proposer);
     console2.log('       independent of [next]: may be sent now so the delay overlaps');
@@ -422,6 +534,46 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
     );
   }
 
+  /// @dev Nothing is the next step (an operation is maturing, or everything is done).
+  function _clearNext() internal {
+    delete lastEmitted;
+    delete lastEmittedTxs;
+  }
+
+  function _clearAlso() internal {
+    delete alsoEmitted;
+    delete alsoEmittedTxs;
+  }
+
+  /// @dev memory -> storage copy of a Tx array (element-wise: struct arrays cannot be assigned).
+  function _store(GnosisTxBuilder.Tx[] storage dst, GnosisTxBuilder.Tx[] memory src) internal {
+    while (dst.length > 0) {
+      dst.pop();
+    }
+    for (uint256 i; i < src.length; i++) {
+      dst.push(src[i]);
+    }
+  }
+
+  /// @dev Applies a written batch in THIS VM, every call pranked from its signer (a throwaway
+  /// account when execution is open), bubbling the first revert. A Safe Transaction Builder batch
+  /// runs through MultiSend, so the targets see the Safe as msg.sender exactly like this.
+  function _simulate(Emitted memory batch, GnosisTxBuilder.Tx[] storage txs) internal {
+    address sender = batch.signer == address(0) ? makeAddr('anyone') : batch.signer;
+    for (uint256 i; i < txs.length; i++) {
+      vm.prank(sender);
+      (bool ok, bytes memory ret) = txs[i].to.call{value: txs[i].value}(txs[i].data);
+      if (!ok) {
+        console2.log('[sim] REVERTED:', txs[i].note);
+        assembly ('memory-safe') {
+          revert(add(ret, 32), mload(ret))
+        }
+      }
+    }
+    console2.log('[sim] applied', batch.path);
+    console2.log('      as', sender);
+  }
+
   function _operationId(
     address timelock,
     bytes32 salt,
@@ -476,6 +628,97 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
     for (uint256 i; i < txs.length; i++) {
       out = string.concat(out, i == 0 ? '' : '; ', vm.toString(i + 1), ') ', txs[i].note);
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // Signer routing and plan simulation
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+  /// @dev `account` may send this call right now, per the AccessManager (no execution delay).
+  function _canCall(address account, GnosisTxBuilder.Tx memory call) internal view returns (bool) {
+    (bool allowed, uint32 delay) = IAccessManager(Cash.ACCESS_MANAGER).canCall(
+      account,
+      call.to,
+      bytes4(call.data)
+    );
+    return allowed && delay == 0;
+  }
+
+  /// @dev Every call in `calls` must be sendable by `safe` right now (reverts with the first
+  /// one that is not, e.g. a selector the timelock migration has moved behind the queue).
+  function _requireCanCall(address safe, GnosisTxBuilder.Tx[] memory calls) internal view {
+    for (uint256 i; i < calls.length; i++) {
+      require(_canCall(safe, calls[i]), NoSigner(calls[i].note));
+    }
+  }
+
+  /// @dev The first `n` entries of `txs`.
+  function _take(
+    GnosisTxBuilder.Tx[] memory txs,
+    uint256 n
+  ) internal pure returns (GnosisTxBuilder.Tx[] memory out) {
+    out = new GnosisTxBuilder.Tx[](n);
+    for (uint256 i; i < n; i++) {
+      out[i] = txs[i];
+    }
+  }
+
+  /// @dev Runs `configure` (a script's state machine returning its phase as uint256) and applies
+  /// every batch it writes in this VM as its signer, letting `delay` pass when nothing is
+  /// sendable, until it returns `complete`. Every remaining batch is thereby written AND proven
+  /// to succeed in sequence against live state. Prints the queue in execution order.
+  /// @return live the phase the chain is actually at (the first `configure` result)
+  function _plan(
+    function() internal returns (uint256) configure,
+    uint256 complete,
+    uint256 delay
+  ) internal returns (uint256 live) {
+    live = configure();
+    uint256 phase = live;
+    string[] memory queue = new string[](24);
+    uint256 n;
+    for (uint256 step = 1; phase != complete; step++) {
+      require(step <= 24, PlanDidNotConverge(step));
+      console2.log('');
+      console2.log('--- plan step', step, ': simulating in this VM');
+      bool next = bytes(lastEmitted.path).length != 0;
+      bool also = bytes(alsoEmitted.path).length != 0;
+      if (!next && !also) {
+        vm.warp(block.timestamp + delay);
+        console2.log('[sim] delay passed: the maturing operation is now Ready');
+        queue[n++] = string.concat('   (', vm.toString(delay), 's delay)');
+      }
+      if (next) {
+        _simulate(lastEmitted, lastEmittedTxs);
+        queue[n++] = string.concat(_who(lastEmitted.signer), ' ', lastEmitted.path);
+      }
+      if (also) {
+        _simulate(alsoEmitted, alsoEmittedTxs);
+        queue[n++] = string.concat(
+          _who(alsoEmitted.signer),
+          ' ',
+          alsoEmitted.path,
+          ' (with the previous)'
+        );
+      }
+      phase = configure();
+    }
+    console2.log('');
+    console2.log('=== PLAN: every remaining batch written and simulated to COMPLETE ===');
+    console2.log(
+      'Queue, in execution order (each line waits for the one above, except (delay) and "with"):'
+    );
+    for (uint256 i; i < n; i++) {
+      console2.log(string.concat(vm.toString(i + 1), '. ', queue[i]));
+    }
+    console2.log('Live next step (configure()):', live);
+  }
+
+  function _who(address signer) internal pure returns (string memory) {
+    if (signer == Cash.OWNER_SAFE) return '[Admin Safe]   ';
+    if (signer == Cash.TIMELOCK_SAFE) return '[Timelock Safe]';
+    if (signer == address(0)) return '[anyone]       ';
+    return vm.toString(signer);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -538,6 +781,8 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
     if (target == Cash.ACCESS_MANAGER) return 'AccessManager';
     if (target == Cash.HUB_CONFIGURATOR) return 'HubConfigurator';
     if (target == Cash.SPOKE_CONFIGURATOR) return 'SpokeConfigurator';
+    if (target == Hubs.CASH_HUB) return 'CashHub';
+    if (target == Spokes.CASH_SPOKE) return 'CashSpoke';
     if (target == Hubs.CASH_HUB_PROXY_ADMIN) return 'CashHubProxyAdmin';
     if (target == Spokes.CASH_SPOKE_PROXY_ADMIN) return 'CashSpokeProxyAdmin';
     if (target == Spokes.TREASURY_SPOKE_PROXY_ADMIN) return 'TreasurySpokeProxyAdmin';

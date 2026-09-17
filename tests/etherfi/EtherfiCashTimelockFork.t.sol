@@ -54,21 +54,32 @@ contract EtherfiCashTimelockForkTest is Test {
     _step(EtherfiCashTimelockScript.Phase.EXECUTOR); // execute 1b-i (anyone: last open execution)
     _step(EtherfiCashTimelockScript.Phase.CANCELLERS); // execute 1b-ii (Timelock Safe only)
 
-    _step(EtherfiCashTimelockScript.Phase.ACCESS_MANAGER); // Admin Safe batch + [also] phase 3 schedule (Timelock Safe)
+    // Admin Safe batch + [also] phase 3 schedule (Timelock Safe)
+    _step(EtherfiCashTimelockScript.Phase.ACCESS_MANAGER);
 
-    _step(EtherfiCashTimelockScript.Phase.DRY_RUN); // waiting -> +24h
-    _step(EtherfiCashTimelockScript.Phase.DRY_RUN); // execute (Timelock Safe only)
+    _step(EtherfiCashTimelockScript.Phase.REVOCATIONS); // waiting -> +24h
+    _step(EtherfiCashTimelockScript.Phase.REVOCATIONS); // execute through the timelock (Timelock Safe only)
 
-    _step(EtherfiCashTimelockScript.Phase.OWNERSHIP); // Admin Safe batch
+    _step(EtherfiCashTimelockScript.Phase.OWNERSHIP); // Admin Safe batch (Ownable, no AccessManager role needed)
 
     _step(EtherfiCashTimelockScript.Phase.TREASURY_ACCEPT);
     _step(EtherfiCashTimelockScript.Phase.TREASURY_ACCEPT);
     _step(EtherfiCashTimelockScript.Phase.TREASURY_ACCEPT);
-
-    _step(EtherfiCashTimelockScript.Phase.REVOCATIONS); // Admin Safe batch
 
     _step(EtherfiCashTimelockScript.Phase.COMPLETE);
 
+    _assertEndState();
+  }
+
+  /// @dev plan() = the same rehearsal driven by the script itself: every remaining batch written
+  /// and applied in-VM until COMPLETE, then the same behavioural end state.
+  function test_fork_plan() public {
+    if (!_enabled()) vm.skip(true);
+    timelock = script.timelockAddress();
+    if (timelock.code.length == 0) timelock = script.deploy();
+    EtherfiCashTimelockScript.Phase live = script.plan();
+    assertLt(uint256(live), uint256(EtherfiCashTimelockScript.Phase.COMPLETE), 'live phase');
+    assertEq(uint256(script.configure()), uint256(EtherfiCashTimelockScript.Phase.COMPLETE));
     _assertEndState();
   }
 

@@ -27,7 +27,12 @@ import {IAaveV4ConfigEngine} from 'src/config-engine/interfaces/IAaveV4ConfigEng
 /// @notice ether.fi Cash Aave V4 timelock migration (OP Mainnet). Inputs: `AaveV4EtherfiCash.sol`.
 ///
 ///   deploy()    phase 1a — deterministic EtherFiTimelock deployment (any funded key).
-///   configure() phases 1b-5 — read-only; verifies every completed phase and writes the next
+///   plan()      configure(), then keeps going in this VM: applies every batch it writes as its
+///               signer, lets the 24h delays pass, and repeats until COMPLETE. Every remaining
+///               batch is written AND proven to succeed in sequence against live state, so the
+///               whole migration can be reviewed and queued in the Safes ahead of time (only the
+///               first [next]/[also] batches are sendable right now; the rest wait on chain state).
+///   configure() phases 1b-4 — read-only; verifies every completed phase and writes the next
 ///               Safe batch to output/etherfi/timelock/ ([next]). For timelock operations it also
 ///               pre-writes the execute batch as soon as the schedule batch exists ([prep]), so it
 ///               can be reviewed and queued in the Safe before the delay elapses. A batch that does
@@ -36,9 +41,16 @@ import {IAaveV4ConfigEngine} from 'src/config-engine/interfaces/IAaveV4ConfigEng
 ///               Admin Safe's signing). Re-run after each Safe execution or timelock maturity until
 ///               it returns COMPLETE.
 ///
+///   Order: 1 timelock roles (queue) -> 2 AccessManager wiring (Admin Safe) -> 3 Admin Safe's
+///   timelocked roles revoked THROUGH the queue (the first timelock -> AccessManager call is the
+///   proof of the path; if the timelock could not act, nothing changes and the Admin Safe is still
+///   root) -> 4 ProxyAdmins + TreasurySpoke to the timelock (Admin Safe, then queue accept).
+///
 ///   forge script scripts/etherfi/timelock/EtherfiCashTimelock.s.sol --sig 'deploy()' \
 ///     --rpc-url optimism --account <keystore> --sender <address> --slow --broadcast --verify
 ///   forge script scripts/etherfi/timelock/EtherfiCashTimelock.s.sol --sig 'configure()' \
+///     --rpc-url optimism
+///   forge script scripts/etherfi/timelock/EtherfiCashTimelock.s.sol --sig 'plan()' \
 ///     --rpc-url optimism
 contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
   enum Phase {
@@ -46,10 +58,9 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     EXECUTOR,
     CANCELLERS,
     ACCESS_MANAGER,
-    DRY_RUN,
+    REVOCATIONS,
     OWNERSHIP,
     TREASURY_ACCEPT,
-    REVOCATIONS,
     COMPLETE
   }
 
@@ -87,8 +98,22 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
   }
 
   function configure() external returns (Phase) {
+    return _configure();
+  }
+
+  /// @notice Live next step, then the rest of the migration simulated to COMPLETE in this VM.
+  /// @return live the phase the chain is actually at (what `configure()` returns)
+  function plan() external returns (Phase live) {
+    return Phase(_plan(_step, uint256(Phase.COMPLETE), Timelock.MIN_DELAY));
+  }
+
+  function _step() internal returns (uint256) {
+    return uint256(_configure());
+  }
+
+  function _configure() internal returns (Phase) {
     _requireOpMainnet();
-    delete alsoEmitted;
+    _clearAlso();
     address timelock = _timelockAddress();
     if (timelock.code.length == 0) return _pending(Phase.DEPLOY, 'no timelock code: run deploy()');
     bool executorSeated = _executorSeated(timelock);
@@ -140,7 +165,7 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     bool phase2Done = _hasRole(R.ADMIN_ROLE, timelock);
     bool adminRevoked = !_hasRole(R.ADMIN_ROLE, Cash.OWNER_SAFE);
     _verifyAccessManager(timelock, phase2Done, adminRevoked);
-    GnosisTxBuilder.Tx[] memory txs = new GnosisTxBuilder.Tx[](16);
+    GnosisTxBuilder.Tx[] memory txs = new GnosisTxBuilder.Tx[](14);
     txs[0] = _labelRole(
       R.HUB_CONFIGURATOR_SPOKE_UNHALT_ROLE,
       R.HUB_CONFIGURATOR_SPOKE_UNHALT_ROLE_LABEL
@@ -181,40 +206,53 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     txs[11] = _grantRole(R.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE, timelock);
     txs[12] = _grantRole(R.HUB_DEFICIT_ELIMINATOR_ROLE, timelock);
     txs[13] = _grantRole(R.SPOKE_USER_POSITION_UPDATER_ROLE, timelock);
-    txs[14] = _setRoleGuardian(R.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE, R.HUB_GUARDIAN_ROLE);
-    txs[15] = _setRoleGuardian(R.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE, R.SPOKE_GUARDIAN_ROLE);
 
-    // phase 3 — no-op through the queue (proves timelock -> AccessManager root). Re-sets a phase-2
-    // value: AccessManager refuses to relabel a role (AccessManagerRoleAlreadyLabeled)
-    GnosisTxBuilder.Tx[] memory dryRun = new GnosisTxBuilder.Tx[](1);
-    dryRun[0] = _setRoleGuardian(R.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE, R.HUB_GUARDIAN_ROLE);
+    // phase 3 — the Admin Safe's timelocked roles revoked THROUGH the queue, root admin last.
+    // Doubles as the proof of the timelock -> AccessManager path: `revokeRole` needs ADMIN_ROLE,
+    // which only phase 2 gives the timelock. If the timelock cannot act, the operation reverts and
+    // the Admin Safe is still root. Once it executes only the timelock administers the
+    // AccessManager. POINT OF NO RETURN
+    GnosisTxBuilder.Tx[] memory revocations = new GnosisTxBuilder.Tx[](5);
+    revocations[0] = _revokeRole(R.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE, Cash.OWNER_SAFE);
+    revocations[1] = _revokeRole(R.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE, Cash.OWNER_SAFE);
+    revocations[2] = _revokeRole(R.HUB_DEFICIT_ELIMINATOR_ROLE, Cash.OWNER_SAFE);
+    revocations[3] = _revokeRole(R.SPOKE_USER_POSITION_UPDATER_ROLE, Cash.OWNER_SAFE);
+    revocations[4] = _revokeRole(R.ADMIN_ROLE, Cash.OWNER_SAFE);
 
     if (!phase2Done) {
       _emitBatch(Cash.OWNER_SAFE, 'phase2-admin-safe-access-manager', txs);
       // The phase 3 schedule only needs the Timelock Safe's PROPOSER seat, so it goes out with
       // phase 2 and the 24h delay runs while the Admin Safe signs. Its execute stays [prep]: it
       // needs phase 2 applied (timelock = AccessManager admin) and is gated below.
-      if (!_isOperation(timelock, Timelock.OP_SALT_DRY_RUN, dryRun)) {
+      if (!_isOperation(timelock, Timelock.OP_SALT_REVOCATIONS, revocations)) {
         _emitScheduleAlongside(
           timelock,
           Cash.TIMELOCK_SAFE,
           Cash.TIMELOCK_SAFE,
-          'phase3-dry-run',
-          Timelock.OP_SALT_DRY_RUN,
+          'phase3-revocations',
+          Timelock.OP_SALT_REVOCATIONS,
           Timelock.MIN_DELAY,
-          dryRun
+          revocations
         );
       }
       return Phase.ACCESS_MANAGER;
     }
     _done('phase 2: AccessManager batch applied');
 
-    if (!_isOperationDone(timelock, Timelock.OP_SALT_DRY_RUN, dryRun)) {
-      return _drive(Phase.DRY_RUN, timelock, 'phase3-dry-run', Timelock.OP_SALT_DRY_RUN, dryRun);
+    if (!adminRevoked) {
+      return
+        _drive(
+          Phase.REVOCATIONS,
+          timelock,
+          'phase3-revocations',
+          Timelock.OP_SALT_REVOCATIONS,
+          revocations
+        );
     }
-    _done('phase 3: dry run executed through the timelock');
+    _done('phase 3: Admin Safe holds no timelocked role (revoked through the timelock)');
 
-    // phase 4 — Admin Safe, one batch; TreasurySpoke is two-step so the timelock accepts via the queue
+    // phase 4 — Admin Safe, one batch (Ownable, independent of the AccessManager); TreasurySpoke is
+    // two-step so the timelock accepts via the queue. Last step.
     bool proxyAdminsMoved = _owner(Hubs.CASH_HUB_PROXY_ADMIN) == timelock;
     bool treasuryAccepted = _owner(Spokes.TREASURY_SPOKE) == timelock;
     _verifyOwnership(timelock, proxyAdminsMoved, treasuryAccepted);
@@ -240,17 +278,7 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     }
     _done('phase 4b: TreasurySpoke owned by the timelock');
 
-    // phase 5 — Admin Safe, one batch; root admin last. POINT OF NO RETURN
-    txs = new GnosisTxBuilder.Tx[](5);
-    txs[0] = _revokeRole(R.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE, Cash.OWNER_SAFE);
-    txs[1] = _revokeRole(R.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE, Cash.OWNER_SAFE);
-    txs[2] = _revokeRole(R.HUB_DEFICIT_ELIMINATOR_ROLE, Cash.OWNER_SAFE);
-    txs[3] = _revokeRole(R.SPOKE_USER_POSITION_UPDATER_ROLE, Cash.OWNER_SAFE);
-    txs[4] = _revokeRole(R.ADMIN_ROLE, Cash.OWNER_SAFE);
-    if (!adminRevoked) return _emit(Phase.REVOCATIONS, 'phase5-admin-safe-revocations', txs);
-    _done('phase 5: Admin Safe holds no timelocked role');
-
-    delete lastEmitted;
+    _clearNext();
     console2.log('=== COMPLETE: every phase executed and verified ===');
     return Phase.COMPLETE;
   }
@@ -377,17 +405,6 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
     _verifyConstants(payload);
     _verifyRoleMemberships(timelock, migrated, adminRevoked);
     _verifySelectorMap(payload.accessManagerTargetFunctionRoleUpdates(), migrated);
-    IAccessManager am = IAccessManager(Cash.ACCESS_MANAGER);
-    _check(
-      'roleGuardian(200)',
-      am.getRoleGuardian(R.HUB_CONFIGURATOR_DOMAIN_ADMIN_ROLE),
-      migrated ? R.HUB_GUARDIAN_ROLE : R.ADMIN_ROLE
-    );
-    _check(
-      'roleGuardian(400)',
-      am.getRoleGuardian(R.SPOKE_CONFIGURATOR_DOMAIN_ADMIN_ROLE),
-      migrated ? R.SPOKE_GUARDIAN_ROLE : R.ADMIN_ROLE
-    );
     _assertNoMismatches(
       migrated ? 'AccessManager state after phase 2' : 'AccessManager pre-state (live != launch)'
     );
@@ -679,7 +696,7 @@ contract EtherfiCashTimelockScript is EtherfiCashGovernanceBase {
   }
 
   function _pending(Phase phase, string memory reason) internal returns (Phase) {
-    delete lastEmitted;
+    _clearNext();
     console2.log('[next]', reason);
     return phase;
   }

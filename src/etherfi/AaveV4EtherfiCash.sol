@@ -59,10 +59,11 @@ library AaveV4EtherfiCash {
   // signer set distinct from the Owner (Admin) Safe, which keeps a veto (CANCELLER_ROLE) and the
   // un-halt / un-pause roles.
   address internal constant TIMELOCK_SAFE = 0xd442635bc9bF83E21bBA8B65e224F5Db6a011166;
-  // EtherFiTimelock — PREDICTED: CREATE2 via the Safe Singleton Factory with
-  // AaveV4EtherfiCashTimelock.SALT and constant constructor args, so it is deployer-independent.
-  // Pin after `deploy()` prints it; the script asserts equality.
-  address internal constant TIMELOCK = address(0);
+  // EtherFiTimelock — VERIFIED 2026-09-17: CREATE2 via the Safe Singleton Factory with
+  // AaveV4EtherfiCashTimelock.SALT and constant constructor args (deployer-independent); live
+  // runtime code == type(EtherFiTimelock).runtimeCode, and the migration script asserts the pin
+  // equals the predicted address on every run.
+  address internal constant TIMELOCK = 0xbaCa0cD6B69Eef3257e2D122b22ddEE8AeE5e283;
 }
 
 /// @notice Hubs of the ether.fi Cash Aave V4 instance.
@@ -172,6 +173,7 @@ library AaveV4EtherfiCashCaps {
   uint40 internal constant WETH_ADD_CAP = 1_000;
   uint40 internal constant WETH_DRAW_CAP = 100;
   uint40 internal constant EURC_ADD_CAP = 5_000_000;
+  uint40 internal constant EURC_DRAW_CAP = 0; // borrowable follow-up: opened CLOSED on purpose; the risk curator (201) raises it
   uint40 internal constant FRXUSD_ADD_CAP = 5_000_000;
   uint40 internal constant WEETH_ADD_CAP = 1_000;
   uint40 internal constant EBTC_ADD_CAP = 200;
@@ -187,6 +189,22 @@ library AaveV4EtherfiCashCaps {
   uint40 internal constant LIQUID_RESERVE_ADD_CAP = 1_000_000;
   uint40 internal constant WEEUR_ADD_CAP = 1_000_000;
   uint40 internal constant LIQUID_RWA_ADD_CAP = 1_000_000;
+}
+
+/// @notice Debt-side parameters of the reserves made borrowable after launch (BPS). The launch
+/// curves live in EtherfiCashLaunchPayload; these are applied by scripts/etherfi/borrowable
+/// together with the AaveV4EtherfiCashCaps draw cap (set to 0 explicitly: borrowable but closed
+/// until the risk curator, HUB_RISK_CURATOR_ROLE, raises it with updateSpokeDrawCap). Not part of
+/// the address-book upstream — configuration only.
+library AaveV4EtherfiCashRates {
+  // EURC — PROPOSED: mirrors USDC's LIVE hub configuration (read 2026-09-17: fee 30%, kink 85%,
+  // base 3%, slope1 1.25%, slope2 10%, max 14.25%), not the launch sheet. Confirm with the risk
+  // curator (Nonce) before signing; the script reads every value back after execution.
+  uint256 internal constant EURC_LIQUIDITY_FEE = 30_00;
+  uint16 internal constant EURC_OPTIMAL_USAGE_RATIO = 85_00;
+  uint32 internal constant EURC_BASE_DRAWN_RATE = 3_00;
+  uint32 internal constant EURC_RATE_GROWTH_BEFORE_OPTIMAL = 1_25;
+  uint32 internal constant EURC_RATE_GROWTH_AFTER_OPTIMAL = 10_00;
 }
 
 /// @notice EtherFiTimelock parameters (cash-v3 contract, OpenZeppelin TimelockController). Not part of
@@ -214,7 +232,10 @@ library AaveV4EtherfiCashTimelock {
   /// @dev phase 1b-ii: CANCELLER_ROLE to the Admin + Operator Safes (first Timelock-Safe-only execute)
   bytes32 internal constant OP_SALT_CANCELLERS =
     keccak256('ETHERFI_CASH_TIMELOCK_OP_CANCELLERS_V1');
-  bytes32 internal constant OP_SALT_DRY_RUN = keccak256('ETHERFI_CASH_TIMELOCK_OP_DRY_RUN_V1');
+  /// @dev phase 3: the Admin Safe's timelocked AccessManager roles revoked THROUGH the queue — the
+  /// first timelock -> AccessManager call doubles as the proof of the path. POINT OF NO RETURN
+  bytes32 internal constant OP_SALT_REVOCATIONS =
+    keccak256('ETHERFI_CASH_TIMELOCK_OP_REVOCATIONS_V1');
   bytes32 internal constant OP_SALT_TREASURY_ACCEPT =
     keccak256('ETHERFI_CASH_TIMELOCK_OP_TREASURY_ACCEPT_V1');
 }
