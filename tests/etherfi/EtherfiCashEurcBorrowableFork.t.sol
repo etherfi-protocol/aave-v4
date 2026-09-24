@@ -25,7 +25,9 @@ import {IERC20} from 'src/dependencies/openzeppelin/IERC20.sol';
 /// @notice Dress rehearsal of the EURC borrowable batch on an OP Mainnet fork: the batch JSON that
 /// `configure()` wrote is executed from the Owner Safe, `configure()` re-verifies to COMPLETE, the
 /// risk curator (Operator Safe) raises the draw cap from 0, and a Cash Safe actually borrows EURC
-/// against WETH (impossible before). Skips unless forked from OP:
+/// against WETH (impossible before). Once the batch is live on chain (`configure()` already returns
+/// COMPLETE) the pending-batch steps are skipped and the end state + borrow path are verified live.
+/// Skips unless forked from OP:
 ///   forge test --match-path tests/etherfi/EtherfiCashEurcBorrowableFork.t.sol --fork-url <op-rpc> -vv
 contract EtherfiCashEurcBorrowableForkTest is Test {
   IHub internal constant HUB = IHub(Hubs.CASH_HUB);
@@ -61,26 +63,31 @@ contract EtherfiCashEurcBorrowableForkTest is Test {
 
   function test_fork_eurcBorrowable() public {
     if (block.chainid != 10) vm.skip(true);
+    bool live = _liveComplete();
 
-    vm.prank(user);
-    vm.expectRevert(ISpoke.ReserveNotBorrowable.selector);
-    SPOKE.borrow(eurcId, BORROW, user);
+    if (!live) {
+      vm.prank(user);
+      vm.expectRevert(ISpoke.ReserveNotBorrowable.selector);
+      SPOKE.borrow(eurcId, BORROW, user);
 
-    assertEq(uint256(script.configure()), uint256(EtherfiCashEurcBorrowableScript.Phase.SAFE));
-    (string memory path, address signer) = script.lastEmitted();
-    assertEq(signer, Cash.OWNER_SAFE, 'signer');
-    _expectBatchFileReverts(path, makeAddr('anyone'));
-    _expectBatchFileReverts(path, Cash.TIMELOCK_SAFE);
-    _executeBatchFile(path, Cash.OWNER_SAFE);
+      assertEq(uint256(script.configure()), uint256(EtherfiCashEurcBorrowableScript.Phase.SAFE));
+      (string memory path, address signer) = script.lastEmitted();
+      assertEq(signer, Cash.OWNER_SAFE, 'signer');
+      _expectBatchFileReverts(path, makeAddr('anyone'));
+      _expectBatchFileReverts(path, Cash.TIMELOCK_SAFE);
+      _executeBatchFile(path, Cash.OWNER_SAFE);
+    }
 
     assertEq(uint256(script.configure()), uint256(EtherfiCashEurcBorrowableScript.Phase.COMPLETE));
-    _assertEndState();
+    _assertEndState(!live);
 
     // borrowable, but the draw cap was set to 0: nothing goes through until the curator raises it
     uint256 assetId = HUB.getAssetId(Assets.EURC_UNDERLYING);
-    vm.prank(user);
-    vm.expectRevert(abi.encodeWithSelector(IHub.DrawCapExceeded.selector, 0));
-    SPOKE.borrow(eurcId, BORROW, user);
+    if (HUB.getSpokeConfig(assetId, Spokes.CASH_SPOKE).drawCap == 0) {
+      vm.prank(user);
+      vm.expectRevert(abi.encodeWithSelector(IHub.DrawCapExceeded.selector, 0));
+      SPOKE.borrow(eurcId, BORROW, user);
+    }
     vm.prank(Cash.OPERATOR_SAFE);
     IHubConfigurator(Cash.HUB_CONFIGURATOR).updateSpokeDrawCap(
       Hubs.CASH_HUB,
@@ -98,19 +105,25 @@ contract EtherfiCashEurcBorrowableForkTest is Test {
     assertGt(SPOKE.getUserTotalDebt(eurcId, user), BORROW, 'debt accrues (curve is not 0%)');
   }
 
-  /// @dev plan() = the same rehearsal driven by the script itself.
+  /// @dev plan() = the same rehearsal driven by the script itself (a no-op once live).
   function test_fork_plan() public {
     if (block.chainid != 10) vm.skip(true);
+    if (_liveComplete()) {
+      assertEq(uint256(script.plan()), uint256(EtherfiCashEurcBorrowableScript.Phase.COMPLETE));
+      _assertEndState(false);
+      return;
+    }
     assertEq(uint256(script.plan()), uint256(EtherfiCashEurcBorrowableScript.Phase.SAFE));
     assertEq(uint256(script.configure()), uint256(EtherfiCashEurcBorrowableScript.Phase.COMPLETE));
-    _assertEndState();
+    _assertEndState(true);
   }
 
   /// @dev Once the timelock migration has moved updateLiquidityFee / updateBorrowable behind the
   /// queue, the Owner Safe can no longer send the batch and the script says so instead of writing
-  /// a batch that would revert.
+  /// a batch that would revert. Only observable while the batch is still pending: skipped once live.
   function test_fork_afterTimelockMigration_revertsNoSigner() public {
     if (block.chainid != 10) vm.skip(true);
+    if (_liveComplete()) vm.skip(true); // executed on chain before the migration, as planned
     EtherfiCashTimelockScript migration = new EtherfiCashTimelockScript();
     assertEq(
       uint256(migration.plan()) < uint256(EtherfiCashTimelockScript.Phase.COMPLETE),
@@ -121,7 +134,15 @@ contract EtherfiCashEurcBorrowableForkTest is Test {
     script.configure();
   }
 
-  function _assertEndState() internal view {
+  /// @dev True once the Owner Safe batch has been executed on the forked chain: the script has
+  /// nothing left to emit and verifies the live parameters instead.
+  function _liveComplete() internal returns (bool) {
+    return uint256(script.configure()) == uint256(EtherfiCashEurcBorrowableScript.Phase.COMPLETE);
+  }
+
+  /// @param drawCapUntouched the batch was applied in this test, so the draw cap is still the
+  /// explicit 0 it set; live, the risk curator may have raised it since (not a completion criterion).
+  function _assertEndState(bool drawCapUntouched) internal view {
     uint256 assetId = HUB.getAssetId(Assets.EURC_UNDERLYING);
     IAssetInterestRateStrategy.InterestRateData memory ir = IAssetInterestRateStrategy(
       Hubs.CASH_HUB_IR_STRATEGY
@@ -132,7 +153,7 @@ contract EtherfiCashEurcBorrowableForkTest is Test {
     assertEq(ir.rateGrowthAfterOptimal, Rates.EURC_RATE_GROWTH_AFTER_OPTIMAL, 'slope2');
     assertEq(HUB.getAssetConfig(assetId).liquidityFee, Rates.EURC_LIQUIDITY_FEE, 'fee');
     IHub.SpokeConfig memory spokeConfig = HUB.getSpokeConfig(assetId, Spokes.CASH_SPOKE);
-    assertEq(spokeConfig.drawCap, Caps.EURC_DRAW_CAP, 'drawCap explicitly 0');
+    if (drawCapUntouched) assertEq(spokeConfig.drawCap, Caps.EURC_DRAW_CAP, 'drawCap explicitly 0');
     assertEq(spokeConfig.addCap, Caps.EURC_ADD_CAP, 'addCap untouched');
     ISpoke.ReserveConfig memory config = SPOKE.getReserveConfig(eurcId);
     assertTrue(config.borrowable, 'borrowable');
