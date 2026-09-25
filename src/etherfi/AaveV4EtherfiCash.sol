@@ -160,6 +160,45 @@ library AaveV4EtherfiCashAssets {
   address internal constant LIQUID_RWA_UNDERLYING = 0x17bC8Ffd82b8a36e737Ca1141C025089589B915e;
   address internal constant LIQUID_RWA_ORACLE = 0x6148eE0E0923Ed5F0cCde2600a85166f4E250154;
   uint8 internal constant LIQUID_RWA_DECIMALS = 18;
+
+  // ZCHF (Frankencoin, CHF stablecoin) — post-launch collateral-only listing through the timelock
+  // (scripts/etherfi/listings). Underlying VERIFIED 2026-09-17 (symbol ZCHF, 18 decimals, native OP
+  // token — not an ether.fi OFT). The price is the mainnet Chainlink CHF / USD aggregator
+  // (0x449d117117838fFA61263B61dA6301AA2a88B13A) relayed over LayerZero to the prod OracleSink on
+  // OP (0x7cb68ddc781153d9417E08bAf6A64e801e398d42, keyed by MAINNET ZCHF
+  // 0xB58E61C3098d85632Df34EecfB899A1Ed80921cB), read by an immutable cash-v3 OracleSinkPriceFeed
+  // (8 decimals, "ZCHF / USD", 7-day relay bound = the bound of every live cash-v3 Summer Lend feed on OP,
+  // no stable snap: CHF is not USD).
+  // ORACLE is PREDICTED: CREATE3 via the cash-v3 EtherFiDeployer (0xFCD957b5913d607BF2222280093421B1e2Af6f30)
+  // with salt keccak256("ZchfUsdFeed") — cash-v3 scripts/zchf-usdt0-paxgy/DeployZchfUsdt0PaxgyProdFeeds
+  // asserts the deployment lands here; the listing script refuses to schedule until code exists.
+  address internal constant ZCHF_UNDERLYING = 0xD4dD9e2F021BB459D5A5f6c24C12fE09c5D45553;
+  address internal constant ZCHF_ORACLE = 0x7445E49137F073B836eB93Fd2929820d730b948C; // "ZCHF / USD"
+  uint8 internal constant ZCHF_DECIMALS = 18;
+
+  // USDT0 (Tether omnichain USDT, LayerZero OFT) — post-launch collateral-only listing through the
+  // timelock (scripts/etherfi/listings). Underlying VERIFIED 2026-09-23 (symbol "USD₮0", 6 decimals,
+  // not the legacy bridged USDT above). Priced like USDT: the reserve source is the LIVE
+  // "Capped USDT / USD" CAPO adapter the USDT reserve reads (AaveOracle.getReserveSource(2),
+  // 2026-09-23) — the same underlying value, so no new feed is deployed.
+  address internal constant USDT0_UNDERLYING = 0x01bFF41798a0BcF287b996046Ca68b395DbC1071;
+  address internal constant USDT0_ORACLE = 0x7579977643ee68946DB95d9Cb5fF582674619025; // "Capped USDT / USD"
+  uint8 internal constant USDT0_DECIMALS = 6;
+
+  // PAXGy (Paxos "Pax Gold Yield", mainnet 0x6c6494Fd9962eB98B94ffA48F6679058F820700e) — the OP token is
+  // the ether.fi shadow OFT iPAXGy ("EtherFi PAXGy", the iPAXG shape; cash-mainnet-asset-listing), VERIFIED
+  // 2026-09-23: 18 decimals, Operating Safe owner, LayerZero peer of the mainnet OFT adapter
+  // 0x3108f4C4C1fA0dD25523222258cd51c4C9D3b40C. Post-launch collateral-only listing through the
+  // timelock (scripts/etherfi/listings). ORACLE is PREDICTED:
+  // the cash-v3 "PAXGy / USD" ChainlinkPriceFeed (CREATE3 via the EtherFiDeployer, salt
+  // "PaxgyUsdFeed", 8 decimals) = Chainlink "PAXGy / Gold Exchange Rate"
+  // (0xDD12d3De4964eC93F81752c8F2552f053124B180, 18 dec, 24h heartbeat, 7-day bound) x the "XAU / USD"
+  // ChainlinkPriceFeed (0xf66C01179bA7326C95a5d3324Bc364f34CA7c7Af, salt "XauUsdFeed", over Chainlink
+  // XAU / USD 0x8F7bFb42Bf7421c2b34AAD619be4654bFa7B3B8B, 7-day bound). 7 days = the bound of every
+  // live cash-v3 Summer Lend feed on OP (verified 2026-09-23). Rate-composed, deliberately uncapped.
+  address internal constant PAXGY_UNDERLYING = 0x5168E0cDeb3f308F47fDF0D9A2E250A2135C3cF5;
+  address internal constant PAXGY_ORACLE = 0x9B92A2D4468ff3Df8A6Be50Ad043E8a5165459c2; // "PAXGy / USD"
+  uint8 internal constant PAXGY_DECIMALS = 18;
 }
 
 /// @notice Launch spoke caps (whole tokens, uint40) — FINAL per the 'Submit to AAVE' section
@@ -174,6 +213,7 @@ library AaveV4EtherfiCashCaps {
   uint40 internal constant WETH_DRAW_CAP = 100;
   uint40 internal constant EURC_ADD_CAP = 5_000_000;
   uint40 internal constant EURC_DRAW_CAP = 0; // borrowable follow-up: opened CLOSED on purpose; the risk curator (201) raises it
+  uint40 internal constant USDT_DRAW_CAP = 0; // opened for borrowing CLOSED on purpose (scripts/etherfi/listings); the risk curator (201) raises it
   uint40 internal constant FRXUSD_ADD_CAP = 5_000_000;
   uint40 internal constant WEETH_ADD_CAP = 1_000;
   uint40 internal constant EBTC_ADD_CAP = 200;
@@ -189,6 +229,41 @@ library AaveV4EtherfiCashCaps {
   uint40 internal constant LIQUID_RESERVE_ADD_CAP = 1_000_000;
   uint40 internal constant WEEUR_ADD_CAP = 1_000_000;
   uint40 internal constant LIQUID_RWA_ADD_CAP = 1_000_000;
+  // ZCHF — PROPOSED (~$1.2M at listing-time CHF/USD); collateral-only, draw cap 0 by design
+  uint40 internal constant ZCHF_ADD_CAP = 0;
+  // USDT0 — PROPOSED (~$5M; the USDT reserve sits at 30M live); listed BORROWABLE with the draw cap
+  // pinned to 0 (opened closed on purpose; the risk curator (201) raises it)
+  uint40 internal constant USDT0_ADD_CAP = 5_000_000;
+  uint40 internal constant USDT0_DRAW_CAP = 0;
+  // PAXGy — PROPOSED placeholder (iPAXG sits at 300); collateral-only, draw cap 0 by design
+  uint40 internal constant PAXGY_ADD_CAP = 0;
+}
+
+/// @notice Collateral-side parameters of the reserves listed after launch (BPS), applied by the
+/// listing scripts (scripts/etherfi/listings) through the timelock. Collateral-only house style of the
+/// launch payload: flat 0% curve (kink 99%), 0% liquidity fee, 10% liquidation fee, collateral risk
+/// 0, receive-shares on, not borrowable. Not part of the address-book upstream — configuration only.
+library AaveV4EtherfiCashCollateral {
+  // shared by every collateral-only reserve (EtherfiCashLaunchPayload._collateralOnly)
+  uint16 internal constant COLLATERAL_ONLY_OPTIMAL_USAGE_RATIO = 99_00;
+  uint256 internal constant COLLATERAL_ONLY_LIQUIDITY_FEE = 0;
+  uint16 internal constant LIQUIDATION_FEE = 10_00;
+  uint24 internal constant COLLATERAL_RISK = 0;
+
+  // ZCHF — PROPOSED pending the risk curator (Nonce). A non-USD, CDP-backed stablecoin: below the
+  // fiat-backed stables (CF 95% / bonus 1% at launch), at the live EURC bonus (7.5%). Confirm before
+  // signing; the script reads every value back after execution.
+  uint16 internal constant ZCHF_COLLATERAL_FACTOR = 85_00;
+  uint32 internal constant ZCHF_MAX_LIQUIDATION_BONUS = 107_50; // 100_00 = 0% bonus
+
+  // USDT0 — PROPOSED: mirrors the live USDT reserve (CF 90% / max bonus 5%, read 2026-09-23); the
+  // debt side (borrowable, curve, fee) is in AaveV4EtherfiCashRates.
+  uint16 internal constant USDT0_COLLATERAL_FACTOR = 90_00;
+  uint32 internal constant USDT0_MAX_LIQUIDATION_BONUS = 105_00;
+
+  // PAXGy — PROPOSED placeholder: mirrors the live iPAXG reserve (CF 80% / max bonus 10%).
+  uint16 internal constant PAXGY_COLLATERAL_FACTOR = 75_00;
+  uint32 internal constant PAXGY_MAX_LIQUIDATION_BONUS = 110_00;
 }
 
 /// @notice Debt-side parameters of the reserves made borrowable after launch (BPS). The launch
@@ -205,6 +280,20 @@ library AaveV4EtherfiCashRates {
   uint32 internal constant EURC_BASE_DRAWN_RATE = 3_00;
   uint32 internal constant EURC_RATE_GROWTH_BEFORE_OPTIMAL = 1_25;
   uint32 internal constant EURC_RATE_GROWTH_AFTER_OPTIMAL = 10_00;
+
+  // USDT (opened for borrowing post-launch, scripts/etherfi/listings) and USDT0 (listed borrowable
+  // there) — PROPOSED: both mirror USDC's LIVE hub configuration (re-read 2026-09-23: fee 30%, kink
+  // 85%, base 3%, slope1 1.25%, slope2 10%). Confirm with the risk curator (Nonce) before signing.
+  uint256 internal constant USDT_LIQUIDITY_FEE = 30_00;
+  uint16 internal constant USDT_OPTIMAL_USAGE_RATIO = 85_00;
+  uint32 internal constant USDT_BASE_DRAWN_RATE = 3_00;
+  uint32 internal constant USDT_RATE_GROWTH_BEFORE_OPTIMAL = 1_25;
+  uint32 internal constant USDT_RATE_GROWTH_AFTER_OPTIMAL = 10_00;
+  uint256 internal constant USDT0_LIQUIDITY_FEE = 30_00;
+  uint16 internal constant USDT0_OPTIMAL_USAGE_RATIO = 85_00;
+  uint32 internal constant USDT0_BASE_DRAWN_RATE = 3_00;
+  uint32 internal constant USDT0_RATE_GROWTH_BEFORE_OPTIMAL = 1_25;
+  uint32 internal constant USDT0_RATE_GROWTH_AFTER_OPTIMAL = 10_00;
 }
 
 /// @notice EtherFiTimelock parameters (cash-v3 contract, OpenZeppelin TimelockController). Not part of
@@ -238,6 +327,18 @@ library AaveV4EtherfiCashTimelock {
     keccak256('ETHERFI_CASH_TIMELOCK_OP_REVOCATIONS_V1');
   bytes32 internal constant OP_SALT_TREASURY_ACCEPT =
     keccak256('ETHERFI_CASH_TIMELOCK_OP_TREASURY_ACCEPT_V1');
+
+  // salts of post-migration governance operations (one per listing; bump the suffix to re-run)
+  /// @dev ZCHF collateral-only listing: addAsset + addSpoke + addReserve (scripts/etherfi/listings)
+  bytes32 internal constant OP_SALT_ZCHF_LISTING =
+    keccak256('ETHERFI_CASH_TIMELOCK_OP_ZCHF_LISTING_V1');
+  /// @dev ONE operation: USDT0 listed borrowable + the live USDT reserve opened for borrowing
+  /// (updateLiquidityFee + updateBorrowable) - scripts/etherfi/listings
+  bytes32 internal constant OP_SALT_USDT0_LISTING =
+    keccak256('ETHERFI_CASH_TIMELOCK_OP_USDT0_LISTING_V1');
+  /// @dev PAXGy collateral-only listing (scripts/etherfi/listings)
+  bytes32 internal constant OP_SALT_PAXGY_LISTING =
+    keccak256('ETHERFI_CASH_TIMELOCK_OP_PAXGY_LISTING_V1');
 }
 
 /// @notice AccessManager roles of the instance: Aave Roles.sol IDs, the launch payload's curator /

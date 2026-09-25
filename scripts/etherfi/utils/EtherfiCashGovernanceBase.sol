@@ -15,7 +15,9 @@ import {IAccessControl} from 'src/dependencies/openzeppelin/IAccessControl.sol';
 import {IAccessManager} from 'src/dependencies/openzeppelin/IAccessManager.sol';
 import {Ownable} from 'src/dependencies/openzeppelin/Ownable.sol';
 import {Ownable2StepUpgradeable} from 'src/dependencies/openzeppelin-upgradeable/Ownable2StepUpgradeable.sol';
+import {IHub} from 'src/hub/interfaces/IHub.sol';
 import {IHubConfigurator} from 'src/hub/interfaces/IHubConfigurator.sol';
+import {ISpoke} from 'src/spoke/interfaces/ISpoke.sol';
 import {ISpokeConfigurator} from 'src/spoke/interfaces/ISpokeConfigurator.sol';
 import {IAssetInterestRateStrategy} from 'src/hub/interfaces/IAssetInterestRateStrategy.sol';
 
@@ -29,6 +31,7 @@ import {IAssetInterestRateStrategy} from 'src/hub/interfaces/IAssetInterestRateS
 ///     Ownable / AccessControl calls
 ///   - `_updateInterestRateData`, `_updateLiquidityFee`, `_updateSpokeDrawCap`, `_updateBorrowable`:
 ///     HubConfigurator / SpokeConfigurator parameter calls
+///   - `_addAsset`, `_addSpoke`, `_addReserve`: HubConfigurator / SpokeConfigurator listing calls
 ///   - `_canCall` / `_requireCanCall`: may a Safe send these calls right now (AccessManager)
 ///   - `_plan`: re-run a script's `configure()` and apply what it writes in this VM until COMPLETE
 ///   - `_emitBatch`: write a Safe Transaction Builder batch (+ .md twin), remembered in `lastEmitted`
@@ -38,6 +41,9 @@ import {IAssetInterestRateStrategy} from 'src/hub/interfaces/IAssetInterestRateS
 ///   - `_emitSchedules`: one Safe MultiSend that schedules several operations at once
 ///   - `_emitScheduleAlongside`: a schedule batch that is independent of `lastEmitted` and may be
 ///     sent at the same time (recorded in `alsoEmitted`), so the delay overlaps the current step
+///   - `_emitSchedulesAlongside` / `_emitExecutes` / `_previewExecutes`: the several-operations twins
+///     (one MultiSend scheduling / executing / pre-writing N operations in order)
+///   - `_emitBatchAlongside`: a plain Safe batch as an [also] step
 ///   - `_check*` / `_assertNoMismatches`: accumulate mismatches, revert with the count
 abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
   /// @notice The batch last written; `signer` == address(0) means anyone may send it (open
@@ -301,6 +307,144 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
       );
   }
 
+  function _addAsset(
+    address hub,
+    address underlying,
+    address feeReceiver,
+    uint256 liquidityFee,
+    address irStrategy,
+    IAssetInterestRateStrategy.InterestRateData memory irData
+  ) internal pure returns (GnosisTxBuilder.Tx memory) {
+    return
+      _tx(
+        Cash.HUB_CONFIGURATOR,
+        abi.encodeCall(
+          IHubConfigurator.addAsset,
+          (hub, underlying, feeReceiver, liquidityFee, irStrategy, abi.encode(irData))
+        ),
+        string.concat(
+          'HubConfigurator.addAsset(',
+          _name(hub),
+          ', underlying ',
+          vm.toString(underlying),
+          ', feeReceiver ',
+          _name(feeReceiver),
+          ', liquidityFee ',
+          vm.toString(liquidityFee),
+          ', ',
+          _name(irStrategy),
+          ', {optimalUsageRatio: ',
+          vm.toString(irData.optimalUsageRatio),
+          ', baseDrawnRate: ',
+          vm.toString(irData.baseDrawnRate),
+          ', rateGrowthBeforeOptimal: ',
+          vm.toString(irData.rateGrowthBeforeOptimal),
+          ', rateGrowthAfterOptimal: ',
+          vm.toString(irData.rateGrowthAfterOptimal),
+          '})'
+        )
+      );
+  }
+
+  function _addSpoke(
+    address hub,
+    address spoke,
+    uint256 assetId,
+    IHub.SpokeConfig memory config
+  ) internal pure returns (GnosisTxBuilder.Tx memory) {
+    return
+      _tx(
+        Cash.HUB_CONFIGURATOR,
+        abi.encodeCall(IHubConfigurator.addSpoke, (hub, spoke, assetId, config)),
+        string.concat(
+          'HubConfigurator.addSpoke(',
+          _name(hub),
+          ', ',
+          _name(spoke),
+          ', assetId ',
+          vm.toString(assetId),
+          ', {addCap: ',
+          vm.toString(config.addCap),
+          ', drawCap: ',
+          vm.toString(config.drawCap),
+          ', riskPremiumThreshold: ',
+          vm.toString(config.riskPremiumThreshold),
+          ', active: ',
+          config.active ? 'true' : 'false',
+          ', halted: ',
+          config.halted ? 'true' : 'false',
+          '})'
+        )
+      );
+  }
+
+  function _addReserve(
+    address spoke,
+    address hub,
+    uint256 assetId,
+    address priceSource,
+    ISpoke.ReserveConfig memory config,
+    ISpoke.DynamicReserveConfig memory dynamicConfig
+  ) internal pure returns (GnosisTxBuilder.Tx memory) {
+    return
+      _tx(
+        Cash.SPOKE_CONFIGURATOR,
+        abi.encodeCall(
+          ISpokeConfigurator.addReserve,
+          (spoke, hub, assetId, priceSource, config, dynamicConfig)
+        ),
+        string.concat(
+          'SpokeConfigurator.addReserve(',
+          _name(spoke),
+          ', ',
+          _name(hub),
+          ', assetId ',
+          vm.toString(assetId),
+          ', priceSource ',
+          vm.toString(priceSource),
+          ', ',
+          _reserveConfigNote(config),
+          ', ',
+          _dynamicReserveConfigNote(dynamicConfig),
+          ')'
+        )
+      );
+  }
+
+  function _reserveConfigNote(
+    ISpoke.ReserveConfig memory config
+  ) internal pure returns (string memory) {
+    return
+      string.concat(
+        '{collateralRisk: ',
+        vm.toString(config.collateralRisk),
+        ', paused: ',
+        config.paused ? 'true' : 'false',
+        ', frozen: ',
+        config.frozen ? 'true' : 'false',
+        ', borrowable: ',
+        config.borrowable ? 'true' : 'false',
+        ', receiveSharesEnabled: ',
+        config.receiveSharesEnabled ? 'true' : 'false',
+        '}'
+      );
+  }
+
+  function _dynamicReserveConfigNote(
+    ISpoke.DynamicReserveConfig memory dynamicConfig
+  ) internal pure returns (string memory) {
+    return
+      string.concat(
+        '{collateralFactor: ',
+        vm.toString(dynamicConfig.collateralFactor),
+        ', maxLiquidationBonus: ',
+        vm.toString(dynamicConfig.maxLiquidationBonus),
+        ', liquidationFee: ',
+        vm.toString(dynamicConfig.liquidationFee),
+        '}'
+      );
+  }
+
   function _sel(bytes4 a) internal pure returns (bytes4[] memory s) {
     s = new bytes4[](1);
     s[0] = a;
@@ -450,6 +594,92 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
     console2.log('       operation id:');
     console2.logBytes32(_operationId(timelock, salt, txs));
     _previewExecute(timelock, executor, name, salt, txs);
+  }
+
+  /// @dev Writes a plain Safe batch for `safe` as an [also] step: independent of the current
+  /// `[next]` batch, so it can be sent at the same time. Recorded in `alsoEmitted`.
+  function _emitBatchAlongside(
+    address safe,
+    string memory name,
+    GnosisTxBuilder.Tx[] memory txs
+  ) internal {
+    string memory path = _writeBatch(safe, name, txs);
+    alsoEmitted = Emitted({path: path, signer: safe});
+    _store(alsoEmittedTxs, txs);
+    console2.log('[also] wrote', path);
+    console2.log('       signer:', safe);
+    console2.log('       independent of [next]: may be sent now');
+    for (uint256 i; i < txs.length; i++) {
+      console2.log(string.concat('       ', vm.toString(i + 1), '. ', txs[i].note));
+    }
+  }
+
+  /// @dev `_emitSchedules` as an [also] step: ONE MultiSend from `proposer` scheduling several
+  /// operations, independent of the current `[next]` batch (scheduling only needs the PROPOSER
+  /// seat). Recorded in `alsoEmitted`, never in `lastEmitted`.
+  function _emitSchedulesAlongside(
+    address timelock,
+    address proposer,
+    string memory name,
+    bytes32[] memory salts,
+    uint256 delay,
+    GnosisTxBuilder.Tx[][] memory ops
+  ) internal {
+    GnosisTxBuilder.Tx[] memory schedules = new GnosisTxBuilder.Tx[](ops.length);
+    for (uint256 i; i < ops.length; i++) {
+      schedules[i] = _scheduleCall(timelock, salts[i], delay, ops[i]);
+    }
+    string memory path = _writeBatch(proposer, string.concat(name, '-schedule'), schedules);
+    alsoEmitted = Emitted({path: path, signer: proposer});
+    _store(alsoEmittedTxs, schedules);
+    console2.log('[also] wrote', path);
+    console2.log('       signer:', proposer);
+    console2.log('       independent of [next]: may be sent now so the delay overlaps');
+    for (uint256 i; i < ops.length; i++) {
+      console2.log(string.concat('       ', vm.toString(i + 1), '. ', schedules[i].note));
+      console2.log(string.concat('       operation id ', vm.toString(i + 1), ':'));
+      console2.logBytes32(_operationId(timelock, salts[i], ops[i]));
+    }
+  }
+
+  /// @dev Pre-writes ONE execute batch for several operations that are not Ready yet (the
+  /// multi-operation twin of `_previewExecute`). Not the next step.
+  function _previewExecutes(
+    address timelock,
+    address executor,
+    string memory name,
+    bytes32[] memory salts,
+    GnosisTxBuilder.Tx[][] memory ops
+  ) internal {
+    GnosisTxBuilder.Tx[] memory executes = new GnosisTxBuilder.Tx[](ops.length);
+    for (uint256 i; i < ops.length; i++) {
+      executes[i] = _executeCall(timelock, salts[i], ops[i]);
+    }
+    string memory path = _writeBatch(executor, string.concat(name, '-execute'), executes);
+    console2.log('[prep] wrote', path);
+    console2.log('       execute batch for', executor, '- sendable once the operations mature');
+  }
+
+  /// @dev ONE Safe batch (MultiSend) from `executor` executing `ops.length` Ready operations in
+  /// order, `salts[i]` for `ops[i]` (the multi-operation twin of `_emitExecute`).
+  function _emitExecutes(
+    address timelock,
+    address executor,
+    string memory name,
+    bytes32[] memory salts,
+    GnosisTxBuilder.Tx[][] memory ops
+  ) internal {
+    TimelockController tl = TimelockController(payable(timelock));
+    bytes32 executorRole = tl.EXECUTOR_ROLE();
+    bool open = tl.hasRole(executorRole, address(0));
+    require(open || tl.hasRole(executorRole, executor), NotExecutor(timelock, executor));
+
+    GnosisTxBuilder.Tx[] memory executes = new GnosisTxBuilder.Tx[](ops.length);
+    for (uint256 i; i < ops.length; i++) {
+      executes[i] = _executeCall(timelock, salts[i], ops[i]);
+    }
+    _emitBatch(executor, string.concat(name, '-execute'), executes);
+    if (open) lastEmitted.signer = address(0);
   }
 
   /// @dev Pre-writes the execute batch of an operation that is not Ready yet (for `executor`;
@@ -717,6 +947,7 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
   function _who(address signer) internal pure returns (string memory) {
     if (signer == Cash.OWNER_SAFE) return '[Admin Safe]   ';
     if (signer == Cash.TIMELOCK_SAFE) return '[Timelock Safe]';
+    if (signer == Cash.OPERATOR_SAFE) return '[Operator Safe]';
     if (signer == address(0)) return '[anyone]       ';
     return vm.toString(signer);
   }
@@ -782,6 +1013,7 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
     if (target == Cash.HUB_CONFIGURATOR) return 'HubConfigurator';
     if (target == Cash.SPOKE_CONFIGURATOR) return 'SpokeConfigurator';
     if (target == Hubs.CASH_HUB) return 'CashHub';
+    if (target == Hubs.CASH_HUB_IR_STRATEGY) return 'CashHubIRStrategy';
     if (target == Spokes.CASH_SPOKE) return 'CashSpoke';
     if (target == Hubs.CASH_HUB_PROXY_ADMIN) return 'CashHubProxyAdmin';
     if (target == Spokes.CASH_SPOKE_PROXY_ADMIN) return 'CashSpokeProxyAdmin';
