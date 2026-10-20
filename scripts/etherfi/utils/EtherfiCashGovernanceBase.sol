@@ -790,6 +790,7 @@ abstract contract EtherfiCashGovernanceBase is EtherfiCashScriptBase {
   /// runs through MultiSend, so the targets see the Safe as msg.sender exactly like this.
   function _simulate(Emitted memory batch, GnosisTxBuilder.Tx[] storage txs) internal {
     address sender = batch.signer == address(0) ? makeAddr('anyone') : batch.signer;
+    vm.deal(sender, 1 ether); // some fork backends cannot load a Safe account; funding it materialises it in the VM
     for (uint256 i; i < txs.length; i++) {
       vm.prank(sender);
       (bool ok, bytes memory ret) = txs[i].to.call{value: txs[i].value}(txs[i].data);

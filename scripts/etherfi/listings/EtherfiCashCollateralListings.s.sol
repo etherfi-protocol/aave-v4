@@ -24,14 +24,17 @@ import {IPriceFeed} from 'src/spoke/interfaces/IPriceFeed.sol';
 import {IAssetInterestRateStrategy} from 'src/hub/interfaces/IAssetInterestRateStrategy.sol';
 
 /// @title EtherfiCashCollateralListings
-/// @notice Three timelock operations on the ether.fi Cash Aave V4 instance (OP Mainnet), through the
-/// EtherFiTimelock (the only holder of the configurator domain-admin roles 200 / 400 since the
+/// @notice The timelock listing operations on the ether.fi Cash Aave V4 instance (OP Mainnet), through
+/// the EtherFiTimelock (the only holder of the configurator domain-admin roles 200 / 400 since the
 /// migration), scheduled together in ONE Timelock Safe batch and executed one by one, each from its
-/// own Timelock Safe file:
+/// own Timelock Safe file. A listing already live is verified and skipped, so the table is a ledger:
 ///   usdt   USDT0 listed BORROWABLE (draw cap 0) + the live USDT reserve OPENED for borrowing
 ///          (updateLiquidityFee + updateBorrowable) - one atomic operation, salt OP_SALT_USDT0_LISTING
 ///   paxgy  PAXGy listed collateral-only                                   salt OP_SALT_PAXGY_LISTING
 ///   zchf   ZCHF listed collateral-only                                    salt OP_SALT_ZCHF_LISTING
+///   wspyx  wSPYx listed collateral-only (replaces iwSPYx, reserve 19)     salt OP_SALT_WSPYX_LISTING
+///   wqqqx  wQQQx listed collateral-only (replaces iwQQQx, reserve 21)     salt OP_SALT_WQQQX_LISTING
+///   wtbllx wTBLLx listed collateral-only (replaces iwTBLLx, reserve 22)   salt OP_SALT_WTBLLX_LISTING
 /// The USDT curve and its draw cap (explicitly 0) are the risk curator's calls (role 201): ONE
 /// Operator Safe batch, written alongside; the usdt operation executes only once it has landed.
 /// Inputs: `AaveV4EtherfiCash.sol` (Assets.<ASSET>_*, Caps.<ASSET>_*_CAP, Collateral.*, Rates.*).
@@ -152,7 +155,7 @@ contract EtherfiCashCollateralListingsScript is EtherfiCashGovernanceBase {
 
   /// @dev The listings = the operations, in scheduling AND execution order.
   function _listings() internal pure returns (Listing[] memory l) {
-    l = new Listing[](3);
+    l = new Listing[](6);
     l[0] = Listing({
       symbol: 'USDT0',
       opName: 'usdt',
@@ -206,6 +209,66 @@ contract EtherfiCashCollateralListingsScript is EtherfiCashGovernanceBase {
       ir: _flatCurve(),
       salt: Timelock.OP_SALT_PAXGY_LISTING
     });
+    l[3] = _wrapper(
+      'wSPYx',
+      'wspyx',
+      Assets.WSPYX_UNDERLYING,
+      Assets.WSPYX_ORACLE,
+      Caps.WSPYX_ADD_CAP,
+      Collateral.WSPYX_COLLATERAL_FACTOR,
+      Collateral.WSPYX_MAX_LIQUIDATION_BONUS,
+      Timelock.OP_SALT_WSPYX_LISTING
+    );
+    l[4] = _wrapper(
+      'wQQQx',
+      'wqqqx',
+      Assets.WQQQX_UNDERLYING,
+      Assets.WQQQX_ORACLE,
+      Caps.WQQQX_ADD_CAP,
+      Collateral.WQQQX_COLLATERAL_FACTOR,
+      Collateral.WQQQX_MAX_LIQUIDATION_BONUS,
+      Timelock.OP_SALT_WQQQX_LISTING
+    );
+    l[5] = _wrapper(
+      'wTBLLx',
+      'wtbllx',
+      Assets.WTBLLX_UNDERLYING,
+      Assets.WTBLLX_ORACLE,
+      Caps.WTBLLX_ADD_CAP,
+      Collateral.WTBLLX_COLLATERAL_FACTOR,
+      Collateral.WTBLLX_MAX_LIQUIDATION_BONUS,
+      Timelock.OP_SALT_WTBLLX_LISTING
+    );
+  }
+
+  /// @dev A Backed xStock wrapper listed collateral-only on its "<wrapper> / USD" feed (18 decimals).
+  function _wrapper(
+    string memory symbol,
+    string memory opName,
+    address underlying,
+    address oracle,
+    uint40 addCap,
+    uint16 collateralFactor,
+    uint32 maxLiquidationBonus,
+    bytes32 salt
+  ) internal pure returns (Listing memory) {
+    return
+      Listing({
+        symbol: symbol,
+        opName: opName,
+        underlying: underlying,
+        decimals: 18,
+        oracle: oracle,
+        feedDescription: string.concat(symbol, ' / USD'),
+        addCap: addCap,
+        drawCap: 0,
+        collateralFactor: collateralFactor,
+        maxLiquidationBonus: maxLiquidationBonus,
+        borrowable: false,
+        liquidityFee: Collateral.COLLATERAL_ONLY_LIQUIDITY_FEE,
+        ir: _flatCurve(),
+        salt: salt
+      });
   }
 
   /// @dev The live reserves to open for borrowing, each folded into a listing's operation.

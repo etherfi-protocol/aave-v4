@@ -199,6 +199,28 @@ library AaveV4EtherfiCashAssets {
   address internal constant PAXGY_UNDERLYING = 0x5168E0cDeb3f308F47fDF0D9A2E250A2135C3cF5;
   address internal constant PAXGY_ORACLE = 0x9B92A2D4468ff3Df8A6Be50Ad043E8a5165459c2; // "PAXGy / USD"
   uint8 internal constant PAXGY_DECIMALS = 18;
+
+  // wSPYx / wQQQx / wTBLLx: Backed's ERC-4626 wrappers of the raw xStocks, native on OP since
+  // 2026-09-09 at the same address as on Ethereum (wrapperV2, deterministic). They replace the
+  // LayerZero stand-ins iwSPYx (reserve 19), iwQQQx (21) and iwTBLLx (22) as the Cash collateral
+  // for SPY, QQQ and TBLL (cash-v3 scripts/xstocks-op); the stand-in reserves are frozen and
+  // removed once empty, in a later operation. Underlyings VERIFIED 2026-10-12 (18 decimals,
+  // asset() = the raw stock). Each ORACLE is DEPLOYED 2026-10-12: a cash-v3 ERC4626RatePriceFeed (8 decimals)
+  // = wrapper.convertToAssets(1e18) x the LIVE <STOCK> / USD Aave leg the stand-in reserve already
+  // prices on (SPY 0xf41eBb842D8e2e2ea818BC6f27497fEF97FAe68F, QQQ 0x2cD17B00f5E2C0613323C2fdB9709d54d958AFEb,
+  // TBLL 0xeb1A9eBBe265E3f0Bd69d0eF27536cD1DC77Bc73), CREATE3 via the cash-v3 EtherFiDeployer
+  // (0xFCD957b5913d607BF2222280093421B1e2Af6f30) with salts keccak256("XStocksOP.WSpyxUsdFeed") /
+  // ("XStocksOP.WQqqxUsdFeed") / ("XStocksOP.WTbllxUsdFeed"); cash-v3 scripts/xstocks-op/DeployXStocksOP
+  // asserted the deployments landed here.
+  address internal constant WSPYX_UNDERLYING = 0xE7E553Cd128F0011777323A0b44a7b96EA1CB540;
+  address internal constant WSPYX_ORACLE = 0xCC69Be955A3B76EDf3ef882563a5958Bc369e775; // "wSPYx / USD"
+  uint8 internal constant WSPYX_DECIMALS = 18;
+  address internal constant WQQQX_UNDERLYING = 0x4C1AE29c159838fC1b224636E28E086EB69101f7;
+  address internal constant WQQQX_ORACLE = 0xEE10AC041AD60e3db1a3DfbDa36dE6AEE8765135; // "wQQQx / USD"
+  uint8 internal constant WQQQX_DECIMALS = 18;
+  address internal constant WTBLLX_UNDERLYING = 0x461b25b99606Fe169D6F0dD6816650eF6536403E;
+  address internal constant WTBLLX_ORACLE = 0xB52601150b362cd78c3eA63BA1b565E7727fFbfC; // "wTBLLx / USD"
+  uint8 internal constant WTBLLX_DECIMALS = 18;
 }
 
 /// @notice Launch spoke caps (whole tokens, uint40) — FINAL per the 'Submit to AAVE' section
@@ -237,6 +259,11 @@ library AaveV4EtherfiCashCaps {
   uint40 internal constant USDT0_DRAW_CAP = 0;
   // PAXGy — PROPOSED placeholder (iPAXG sits at 300); collateral-only, draw cap 0 by design
   uint40 internal constant PAXGY_ADD_CAP = 0;
+  // wSPYx / wQQQx / wTBLLx: the LIVE add caps of the stand-in reserves they replace (iwSPYx 2000,
+  // iwQQQx 2000, iwTBLLx 20000, read 2026-10-12); collateral-only, draw cap 0 by design
+  uint40 internal constant WSPYX_ADD_CAP = 2_000;
+  uint40 internal constant WQQQX_ADD_CAP = 2_000;
+  uint40 internal constant WTBLLX_ADD_CAP = 20_000;
 }
 
 /// @notice Collateral-side parameters of the reserves listed after launch (BPS), applied by the
@@ -264,6 +291,16 @@ library AaveV4EtherfiCashCollateral {
   // PAXGy — PROPOSED placeholder: mirrors the live iPAXG reserve (CF 80% / max bonus 10%).
   uint16 internal constant PAXGY_COLLATERAL_FACTOR = 75_00;
   uint32 internal constant PAXGY_MAX_LIQUIDATION_BONUS = 110_00;
+
+  // wSPYx / wQQQx / wTBLLx: the LIVE parameters of the stand-in reserves they replace (iwSPYx and
+  // iwQQQx CF 78%, iwTBLLx CF 80%, max bonus 10% on all three, read 2026-10-12). Same stock, same
+  // risk: a wrapper share is one raw stock at the vault's redemption rate.
+  uint16 internal constant WSPYX_COLLATERAL_FACTOR = 78_00;
+  uint32 internal constant WSPYX_MAX_LIQUIDATION_BONUS = 110_00;
+  uint16 internal constant WQQQX_COLLATERAL_FACTOR = 78_00;
+  uint32 internal constant WQQQX_MAX_LIQUIDATION_BONUS = 110_00;
+  uint16 internal constant WTBLLX_COLLATERAL_FACTOR = 80_00;
+  uint32 internal constant WTBLLX_MAX_LIQUIDATION_BONUS = 110_00;
 }
 
 /// @notice Debt-side parameters of the reserves made borrowable after launch (BPS). The launch
@@ -339,6 +376,13 @@ library AaveV4EtherfiCashTimelock {
   /// @dev PAXGy collateral-only listing (scripts/etherfi/listings)
   bytes32 internal constant OP_SALT_PAXGY_LISTING =
     keccak256('ETHERFI_CASH_TIMELOCK_OP_PAXGY_LISTING_V1');
+  /// @dev wSPYx / wQQQx / wTBLLx collateral-only listings, one operation each (scripts/etherfi/listings)
+  bytes32 internal constant OP_SALT_WSPYX_LISTING =
+    keccak256('ETHERFI_CASH_TIMELOCK_OP_WSPYX_LISTING_V1');
+  bytes32 internal constant OP_SALT_WQQQX_LISTING =
+    keccak256('ETHERFI_CASH_TIMELOCK_OP_WQQQX_LISTING_V1');
+  bytes32 internal constant OP_SALT_WTBLLX_LISTING =
+    keccak256('ETHERFI_CASH_TIMELOCK_OP_WTBLLX_LISTING_V1');
 }
 
 /// @notice AccessManager roles of the instance: Aave Roles.sol IDs, the launch payload's curator /
