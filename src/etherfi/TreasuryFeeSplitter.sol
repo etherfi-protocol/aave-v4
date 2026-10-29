@@ -57,6 +57,7 @@ contract TreasuryFeeSplitter is Ownable2Step, ReentrancyGuardTransient {
   error InvalidPercentSplit();
   error SameRecipients();
   error HubNotAllowed(address hub);
+  error NothingWithdrawn(address token);
 
   /// @param treasurySpoke The TreasurySpoke to own. Ownership is transferred separately
   ///        (two-step: the current owner calls `transferOwnership`, then this contract's owner
@@ -101,7 +102,8 @@ contract TreasuryFeeSplitter is Ownable2Step, ReentrancyGuardTransient {
   /// @dev Withdraws the whole supplied position, capped at the Hub's available liquidity so a
   ///      highly utilized asset is drained as far as possible instead of reverting the batch.
   ///      Tokens with nothing to withdraw are skipped, and so is a recipient whose share rounds
-  ///      to zero. Reverts on a token the Hub does not list.
+  ///      to zero. Reverts on a token the Hub does not list, and if a withdrawal delivers
+  ///      nothing (both shares zero).
   /// @param hub The Hub to withdraw from; must be allowed.
   /// @param tokens The Hub underlyings to withdraw and split.
   function splitRevenue(address hub, IERC20[] calldata tokens) external nonReentrant {
@@ -127,6 +129,10 @@ contract TreasuryFeeSplitter is Ownable2Step, ReentrancyGuardTransient {
 
       uint256 amountA = withdrawn.percentMulDown(SPLIT_PERCENTAGE_RECIPIENT_A);
       uint256 amountB = withdrawn - amountA;
+      // the TreasurySpoke gave up Hub shares but nothing arrived; revert to restore them
+      if (amountA == 0 && amountB == 0) {
+        revert NothingWithdrawn(address(token));
+      }
 
       // skip zero shares: some ERC-20s revert on zero transfers, which would block the batch
       if (amountA > 0) {

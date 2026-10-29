@@ -206,6 +206,33 @@ contract TreasuryFeeSplitterTest is Base {
     assertEq(tokenList.dai.balanceOf(RECIPIENT_B), 1);
   }
 
+  /// @dev A withdrawal that delivers no tokens (both shares zero) reverts, so the TreasurySpoke
+  ///      keeps its Hub shares.
+  function test_splitRevenue_revertsWith_NothingWithdrawn() public {
+    _supplyAsTreasury(hub1, tokenList.dai, 100e18);
+    uint256 sharesBefore = treasurySpoke.getSuppliedShares(address(hub1), address(tokenList.dai));
+    // withdraw succeeds but pays nothing
+    vm.mockCall(
+      address(treasurySpoke),
+      abi.encodeWithSelector(ITreasurySpoke.withdraw.selector),
+      abi.encode(uint256(0), uint256(0))
+    );
+
+    IERC20[] memory tokens = _tokens(address(tokenList.dai));
+    vm.expectRevert(
+      abi.encodeWithSelector(TreasuryFeeSplitter.NothingWithdrawn.selector, address(tokenList.dai))
+    );
+    splitter.splitRevenue(address(hub1), tokens);
+
+    vm.clearMockedCalls();
+    assertEq(
+      treasurySpoke.getSuppliedShares(address(hub1), address(tokenList.dai)),
+      sharesBefore,
+      'shares kept'
+    );
+    assertEq(tokenList.dai.balanceOf(RECIPIENT_A) + tokenList.dai.balanceOf(RECIPIENT_B), 0);
+  }
+
   function test_splitRevenue_cappedAtHubLiquidity() public {
     _accrueFees();
     uint256 fees = treasurySpoke.getSuppliedAssets(address(hub1), address(tokenList.dai));
