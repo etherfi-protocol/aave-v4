@@ -25,7 +25,7 @@ contract TreasuryFeeSplitterTest is Base {
 
   function test_constructor() public view {
     assertEq(address(splitter.TREASURY_SPOKE()), address(treasurySpoke));
-    assertEq(address(splitter.HUB()), address(hub1));
+    assertTrue(splitter.isHubAllowed(address(hub1)));
     assertEq(splitter.owner(), SPLIT_OWNER);
     assertEq(splitter.RECIPIENT_A(), RECIPIENT_A);
     assertEq(splitter.RECIPIENT_B(), RECIPIENT_B);
@@ -43,17 +43,43 @@ contract TreasuryFeeSplitterTest is Base {
 
   function test_constructor_revertsWith_InvalidAddress() public {
     address t = address(treasurySpoke);
-    address h = address(hub1);
+    address[] memory h = _hubList(address(hub1));
+    address[] memory zeroHub = _hubList(address(0));
     vm.expectRevert(TreasuryFeeSplitter.InvalidAddress.selector);
     new TreasuryFeeSplitter(address(0), h, SPLIT_OWNER, RECIPIENT_A, RECIPIENT_B, SPLIT_A);
     vm.expectRevert(TreasuryFeeSplitter.InvalidAddress.selector);
-    new TreasuryFeeSplitter(t, address(0), SPLIT_OWNER, RECIPIENT_A, RECIPIENT_B, SPLIT_A);
+    new TreasuryFeeSplitter(t, zeroHub, SPLIT_OWNER, RECIPIENT_A, RECIPIENT_B, SPLIT_A);
     vm.expectRevert(TreasuryFeeSplitter.InvalidAddress.selector);
     new TreasuryFeeSplitter(t, h, SPLIT_OWNER, address(0), RECIPIENT_B, SPLIT_A);
     vm.expectRevert(TreasuryFeeSplitter.InvalidAddress.selector);
     new TreasuryFeeSplitter(t, h, SPLIT_OWNER, RECIPIENT_A, address(0), SPLIT_A);
     vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
     new TreasuryFeeSplitter(t, h, address(0), RECIPIENT_A, RECIPIENT_B, SPLIT_A);
+  }
+
+  function test_constructor_revertsWith_SameRecipients() public {
+    address[] memory h = _hubList(address(hub1));
+    vm.expectRevert(TreasuryFeeSplitter.SameRecipients.selector);
+    new TreasuryFeeSplitter(
+      address(treasurySpoke),
+      h,
+      SPLIT_OWNER,
+      RECIPIENT_A,
+      RECIPIENT_A,
+      SPLIT_A
+    );
+  }
+
+  function test_constructor_noHubs() public {
+    TreasuryFeeSplitter s = new TreasuryFeeSplitter(
+      address(treasurySpoke),
+      new address[](0),
+      SPLIT_OWNER,
+      RECIPIENT_A,
+      RECIPIENT_B,
+      SPLIT_A
+    );
+    assertFalse(s.isHubAllowed(address(hub1)));
   }
 
   // ---------------------------------------------------------------- handover
@@ -72,6 +98,60 @@ contract TreasuryFeeSplitterTest is Base {
     assertEq(Ownable2Step(address(treasurySpoke)).owner(), newOwner);
   }
 
+  // ---------------------------------------------------------------- hub allowlist
+
+  function test_splitRevenue_revertsWith_HubNotAllowed() public {
+    (IHub hub2, ) = _hub2Fixture();
+    IERC20[] memory tokens = _tokens(address(tokenList.dai));
+    vm.expectRevert(
+      abi.encodeWithSelector(TreasuryFeeSplitter.HubNotAllowed.selector, address(hub2))
+    );
+    splitter.splitRevenue(address(hub2), tokens);
+  }
+
+  function test_setHubAllowed_secondHub() public {
+    // hub2 lists the same TreasurySpoke as fee receiver
+    (IHub hub2, ) = _hub2Fixture();
+    vm.prank(SPLIT_OWNER);
+    splitter.setHubAllowed(address(hub2), true);
+    _supplyAsTreasury(hub1, tokenList.dai, 100e18);
+    _supplyAsTreasury(hub2, tokenList.dai, 10e18);
+
+    splitter.splitRevenue(address(hub2), _tokens(address(tokenList.dai)));
+
+    assertEq(tokenList.dai.balanceOf(RECIPIENT_A), 7e18, 'hub2 split A');
+    assertEq(tokenList.dai.balanceOf(RECIPIENT_B), 3e18, 'hub2 split B');
+    assertEq(
+      treasurySpoke.getSuppliedAssets(address(hub1), address(tokenList.dai)),
+      100e18,
+      'hub1 untouched'
+    );
+  }
+
+  function test_setHubAllowed_disallow() public {
+    _supplyAsTreasury(hub1, tokenList.dai, 100e18);
+    vm.prank(SPLIT_OWNER);
+    splitter.setHubAllowed(address(hub1), false);
+
+    IERC20[] memory tokens = _tokens(address(tokenList.dai));
+    vm.expectRevert(
+      abi.encodeWithSelector(TreasuryFeeSplitter.HubNotAllowed.selector, address(hub1))
+    );
+    splitter.splitRevenue(address(hub1), tokens);
+  }
+
+  function test_setHubAllowed_revertsWith_OwnableUnauthorizedAccount() public {
+    vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, ANYONE));
+    vm.prank(ANYONE);
+    splitter.setHubAllowed(ANYONE, true);
+  }
+
+  function test_setHubAllowed_revertsWith_InvalidAddress() public {
+    vm.expectRevert(TreasuryFeeSplitter.InvalidAddress.selector);
+    vm.prank(SPLIT_OWNER);
+    splitter.setHubAllowed(address(0), true);
+  }
+
   // ---------------------------------------------------------------- splitRevenue
 
   function test_splitRevenue_feesOnly_anyoneCanCall() public {
@@ -80,7 +160,7 @@ contract TreasuryFeeSplitterTest is Base {
     assertGt(fees, 0, 'fees');
 
     vm.prank(ANYONE);
-    splitter.splitRevenue(_tokens(address(tokenList.dai)));
+    splitter.splitRevenue(address(hub1), _tokens(address(tokenList.dai)));
 
     uint256 toA = (fees * SPLIT_A) / 100_00;
     assertEq(tokenList.dai.balanceOf(RECIPIENT_A), toA, 'A');
@@ -90,10 +170,10 @@ contract TreasuryFeeSplitterTest is Base {
   }
 
   function test_splitRevenue_multipleTokens() public {
-    _supplyAsTreasury(tokenList.dai, 1_000e18);
-    _supplyAsTreasury(tokenList.usdx, 500e6);
+    _supplyAsTreasury(hub1, tokenList.dai, 1_000e18);
+    _supplyAsTreasury(hub1, tokenList.usdx, 500e6);
 
-    splitter.splitRevenue(_tokens(address(tokenList.dai), address(tokenList.usdx)));
+    splitter.splitRevenue(address(hub1), _tokens(address(tokenList.dai), address(tokenList.usdx)));
 
     assertEq(tokenList.dai.balanceOf(RECIPIENT_A), 700e18);
     assertEq(tokenList.dai.balanceOf(RECIPIENT_B), 300e18);
@@ -102,16 +182,28 @@ contract TreasuryFeeSplitterTest is Base {
   }
 
   function test_splitRevenue_skipsTokensWithNothingSupplied() public {
-    _supplyAsTreasury(tokenList.dai, 100e18);
+    _supplyAsTreasury(hub1, tokenList.dai, 100e18);
 
-    splitter.splitRevenue(_tokens(address(tokenList.usdx), address(tokenList.dai)));
+    splitter.splitRevenue(address(hub1), _tokens(address(tokenList.usdx), address(tokenList.dai)));
 
     assertEq(tokenList.dai.balanceOf(RECIPIENT_A), 70e18);
     assertEq(tokenList.usdx.balanceOf(RECIPIENT_A), 0);
   }
 
   function test_splitRevenue_emptyArray() public {
-    splitter.splitRevenue(new IERC20[](0));
+    splitter.splitRevenue(address(hub1), new IERC20[](0));
+  }
+
+  /// @dev 1 wei at 70/30: A's share floors to zero, so only B is paid and nothing reverts.
+  function test_splitRevenue_zeroShareSkipped() public {
+    _supplyAsTreasury(hub1, tokenList.dai, 1);
+
+    vm.expectEmit(address(splitter));
+    emit TreasuryFeeSplitter.RevenueSplit(address(hub1), address(tokenList.dai), 0, 1);
+    splitter.splitRevenue(address(hub1), _tokens(address(tokenList.dai)));
+
+    assertEq(tokenList.dai.balanceOf(RECIPIENT_A), 0);
+    assertEq(tokenList.dai.balanceOf(RECIPIENT_B), 1);
   }
 
   function test_splitRevenue_cappedAtHubLiquidity() public {
@@ -124,7 +216,7 @@ contract TreasuryFeeSplitterTest is Base {
     hub1.draw(daiAssetId, toDraw, address(spoke1));
     assertEq(hub1.getAssetLiquidity(daiAssetId), liquidity, 'liquidity');
 
-    splitter.splitRevenue(_tokens(address(tokenList.dai)));
+    splitter.splitRevenue(address(hub1), _tokens(address(tokenList.dai)));
 
     assertEq(
       tokenList.dai.balanceOf(RECIPIENT_A) + tokenList.dai.balanceOf(RECIPIENT_B),
@@ -142,22 +234,43 @@ contract TreasuryFeeSplitterTest is Base {
   function test_splitRevenue_fuzz_conservesAmount(uint256 amount, uint16 splitA) public {
     amount = bound(amount, 1, MAX_SUPPLY_AMOUNT);
     splitA = uint16(bound(splitA, 1, 99_99));
-    splitter = _deploy(splitA);
-    _handOver();
-    _supplyAsTreasury(tokenList.dai, amount);
+    _redeployAndHandOver(splitA);
+    _supplyAsTreasury(hub1, tokenList.dai, amount);
 
-    splitter.splitRevenue(_tokens(address(tokenList.dai)));
+    splitter.splitRevenue(address(hub1), _tokens(address(tokenList.dai)));
 
-    assertEq(tokenList.dai.balanceOf(RECIPIENT_A), (amount * splitA) / 100_00);
-    assertEq(tokenList.dai.balanceOf(RECIPIENT_A) + tokenList.dai.balanceOf(RECIPIENT_B), amount);
+    _assertSplit(
+      tokenList.dai.balanceOf(RECIPIENT_A),
+      tokenList.dai.balanceOf(RECIPIENT_B),
+      amount,
+      splitA
+    );
+    assertEq(tokenList.dai.balanceOf(address(splitter)), 0);
+  }
+
+  /// @dev Small amounts, where A's or B's share rounds to zero and is skipped.
+  function test_splitRevenue_fuzz_smallAmounts(uint256 amount, uint16 splitA) public {
+    amount = bound(amount, 1, 100_00);
+    splitA = uint16(bound(splitA, 1, 99_99));
+    _redeployAndHandOver(splitA);
+    _supplyAsTreasury(hub1, tokenList.dai, amount);
+
+    splitter.splitRevenue(address(hub1), _tokens(address(tokenList.dai)));
+
+    _assertSplit(
+      tokenList.dai.balanceOf(RECIPIENT_A),
+      tokenList.dai.balanceOf(RECIPIENT_B),
+      amount,
+      splitA
+    );
     assertEq(tokenList.dai.balanceOf(address(splitter)), 0);
   }
 
   function test_splitRevenue_ignoresStrayBalance() public {
-    _supplyAsTreasury(tokenList.dai, 1_000e18);
+    _supplyAsTreasury(hub1, tokenList.dai, 1_000e18);
     deal(address(tokenList.dai), address(splitter), 5e18);
 
-    splitter.splitRevenue(_tokens(address(tokenList.dai)));
+    splitter.splitRevenue(address(hub1), _tokens(address(tokenList.dai)));
 
     assertEq(tokenList.dai.balanceOf(RECIPIENT_A), 700e18);
     assertEq(tokenList.dai.balanceOf(RECIPIENT_B), 300e18);
@@ -167,7 +280,7 @@ contract TreasuryFeeSplitterTest is Base {
   function test_splitRevenue_revertsOnUnlistedToken() public {
     IERC20[] memory tokens = _tokens(address(new MockERC20()));
     vm.expectRevert();
-    splitter.splitRevenue(tokens);
+    splitter.splitRevenue(address(hub1), tokens);
   }
 
   // ---------------------------------------------------------------- splitNativeRevenue
@@ -191,12 +304,35 @@ contract TreasuryFeeSplitterTest is Base {
     assertEq(RECIPIENT_A.balance, 0);
   }
 
+  function test_splitNativeRevenue_zeroShareSkipped() public {
+    vm.deal(address(splitter), 1);
+
+    vm.expectEmit(address(splitter));
+    emit TreasuryFeeSplitter.NativeRevenueSplit(0, 1, true, true);
+    splitter.splitNativeRevenue();
+
+    assertEq(RECIPIENT_A.balance, 0);
+    assertEq(RECIPIENT_B.balance, 1);
+  }
+
+  function test_splitNativeRevenue_fuzz(uint256 amount, uint16 splitA) public {
+    amount = bound(amount, 1, 1e30);
+    splitA = uint16(bound(splitA, 1, 99_99));
+    _redeployAndHandOver(splitA);
+    vm.deal(address(splitter), amount);
+
+    splitter.splitNativeRevenue();
+
+    _assertSplit(RECIPIENT_A.balance, RECIPIENT_B.balance, amount, splitA);
+    assertEq(address(splitter).balance, 0);
+  }
+
   function test_splitNativeRevenue_rejectingRecipientDoesNotBlock() public {
     // recipient A is a contract without receive(): its send fails, B is still paid
     address rejecting = address(new MockERC20());
     splitter = new TreasuryFeeSplitter(
       address(treasurySpoke),
-      address(hub1),
+      _hubList(address(hub1)),
       SPLIT_OWNER,
       rejecting,
       RECIPIENT_B,
@@ -204,6 +340,8 @@ contract TreasuryFeeSplitterTest is Base {
     );
     vm.deal(address(splitter), 1 ether);
 
+    vm.expectEmit(address(splitter));
+    emit TreasuryFeeSplitter.NativeRevenueSplit(0.7 ether, 0.3 ether, false, true);
     splitter.splitNativeRevenue();
 
     assertEq(RECIPIENT_B.balance, 0.3 ether);
@@ -234,7 +372,7 @@ contract TreasuryFeeSplitterTest is Base {
   }
 
   function test_executeOnTreasury_withdrawThenRescue() public {
-    _supplyAsTreasury(tokenList.dai, 100e18);
+    _supplyAsTreasury(hub1, tokenList.dai, 100e18);
     address sink = makeAddr('SINK');
 
     vm.startPrank(SPLIT_OWNER);
@@ -260,7 +398,7 @@ contract TreasuryFeeSplitterTest is Base {
     return
       new TreasuryFeeSplitter(
         address(treasurySpoke),
-        address(hub1),
+        _hubList(address(hub1)),
         SPLIT_OWNER,
         RECIPIENT_A,
         RECIPIENT_B,
@@ -277,6 +415,19 @@ contract TreasuryFeeSplitterTest is Base {
     splitter.executeOnTreasury(abi.encodeCall(Ownable2Step.acceptOwnership, ()));
   }
 
+  function _redeployAndHandOver(uint16 splitA) internal {
+    splitter = _deploy(splitA);
+    _handOver();
+  }
+
+  /// @dev A gets floor(amount * splitA / 10_000), B the rest, and nothing is lost.
+  function _assertSplit(uint256 toA, uint256 toB, uint256 amount, uint16 splitA) internal pure {
+    assertEq(toA, (amount * splitA) / 100_00, 'A floors');
+    assertEq(toA + toB, amount, 'conserved');
+    assertLe(toA * 100_00, amount * splitA, 'A never above its share');
+    assertGe(toB * 100_00, amount * (100_00 - splitA), 'B never below its share');
+  }
+
   /// @dev Real liquidity fees: open debt, accrue a year, mint fee shares to the treasury.
   function _accrueFees() internal {
     _openDebtPosition(spoke1, _getReserveIdByAssetId(spoke1, hub1, daiAssetId), 100e18, true);
@@ -285,12 +436,17 @@ contract TreasuryFeeSplitterTest is Base {
   }
 
   /// @dev Treasury-held balance without waiting on accrual: supply skimmed on the treasury.
-  function _supplyAsTreasury(IERC20 token, uint256 amount) internal {
-    deal(address(token), address(hub1), token.balanceOf(address(hub1)) + amount);
+  function _supplyAsTreasury(IHub hub, IERC20 token, uint256 amount) internal {
+    deal(address(token), address(hub), token.balanceOf(address(hub)) + amount);
     vm.prank(SPLIT_OWNER);
     splitter.executeOnTreasury(
-      abi.encodeCall(ITreasurySpoke.supplySkimmed, (address(hub1), address(token), amount))
+      abi.encodeCall(ITreasurySpoke.supplySkimmed, (address(hub), address(token), amount))
     );
+  }
+
+  function _hubList(address a) internal pure returns (address[] memory h) {
+    h = new address[](1);
+    h[0] = a;
   }
 
   function _tokens(address a) internal pure returns (IERC20[] memory t) {

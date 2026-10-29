@@ -34,9 +34,11 @@ contract TreasuryFeeSplitterForkTest is Test {
   function setUp() public {
     if (!_enabled()) return;
 
+    address[] memory hubs = new address[](1);
+    hubs[0] = Hubs.CASH_HUB;
     splitter = new TreasuryFeeSplitter(
       Spokes.TREASURY_SPOKE,
-      Hubs.CASH_HUB,
+      hubs,
       Cash.TIMELOCK,
       RECIPIENT_A,
       RECIPIENT_B,
@@ -94,7 +96,7 @@ contract TreasuryFeeSplitterForkTest is Test {
     assertEq(supplied[3], 0, 'weETH has no fees');
 
     vm.prank(makeAddr('ANYONE'));
-    splitter.splitRevenue(tokens);
+    splitter.splitRevenue(Hubs.CASH_HUB, tokens);
 
     for (uint256 i; i < 4; ++i) {
       uint256 toA = tokens[i].balanceOf(RECIPIENT_A) - aBefore[i];
