@@ -32,6 +32,9 @@ import {IAssetInterestRateStrategy} from 'src/hub/interfaces/IAssetInterestRateS
 ///          (updateLiquidityFee + updateBorrowable) - one atomic operation, salt OP_SALT_USDT0_LISTING
 ///   paxgy  PAXGy listed collateral-only                                   salt OP_SALT_PAXGY_LISTING
 ///   zchf   ZCHF listed collateral-only                                    salt OP_SALT_ZCHF_LISTING
+///   liquiddefi liquidDeFi (Midas) listed collateral-only, add cap 0       salt OP_SALT_LIQUID_DEFI_LISTING
+/// A listing whose underlying or oracle is still address(0) in AaveV4EtherfiCashAssets is skipped
+/// ([todo]): its calldata would be fixed at scheduling, so nothing is queued until both are pinned.
 /// The USDT curve and its draw cap (explicitly 0) are the risk curator's calls (role 201): ONE
 /// Operator Safe batch, written alongside; the usdt operation executes only once it has landed.
 /// Inputs: `AaveV4EtherfiCash.sol` (Assets.<ASSET>_*, Caps.<ASSET>_*_CAP, Collateral.*, Rates.*).
@@ -152,7 +155,7 @@ contract EtherfiCashCollateralListingsScript is EtherfiCashGovernanceBase {
 
   /// @dev The listings = the operations, in scheduling AND execution order.
   function _listings() internal pure returns (Listing[] memory l) {
-    l = new Listing[](3);
+    l = new Listing[](4);
     l[0] = Listing({
       symbol: 'USDT0',
       opName: 'usdt',
@@ -206,6 +209,22 @@ contract EtherfiCashCollateralListingsScript is EtherfiCashGovernanceBase {
       ir: _flatCurve(),
       salt: Timelock.OP_SALT_PAXGY_LISTING
     });
+    l[3] = Listing({
+      symbol: 'liquidDeFi',
+      opName: 'liquiddefi',
+      underlying: Assets.LIQUID_DEFI_UNDERLYING,
+      decimals: Assets.LIQUID_DEFI_DECIMALS,
+      oracle: Assets.LIQUID_DEFI_ORACLE,
+      feedDescription: 'Capped liquidDeFi / USD',
+      addCap: Caps.LIQUID_DEFI_ADD_CAP,
+      drawCap: 0,
+      collateralFactor: Collateral.LIQUID_DEFI_COLLATERAL_FACTOR,
+      maxLiquidationBonus: Collateral.LIQUID_DEFI_MAX_LIQUIDATION_BONUS,
+      borrowable: false,
+      liquidityFee: Collateral.COLLATERAL_ONLY_LIQUIDITY_FEE,
+      ir: _flatCurve(),
+      salt: Timelock.OP_SALT_LIQUID_DEFI_LISTING
+    });
   }
 
   /// @dev The live reserves to open for borrowing, each folded into a listing's operation.
@@ -254,6 +273,16 @@ contract EtherfiCashCollateralListingsScript is EtherfiCashGovernanceBase {
             '[todo] ',
             l.symbol,
             ': underlying not pinned in AaveV4EtherfiCashAssets - skipped'
+          )
+        );
+        continue;
+      }
+      if (l.oracle == address(0)) {
+        console2.log(
+          string.concat(
+            '[todo] ',
+            l.symbol,
+            ': oracle not pinned in AaveV4EtherfiCashAssets - skipped'
           )
         );
         continue;

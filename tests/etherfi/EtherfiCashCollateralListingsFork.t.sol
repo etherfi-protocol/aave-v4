@@ -101,7 +101,7 @@ contract EtherfiCashCollateralListingsForkTest is Test {
     script = new EtherfiCashCollateralListingsScript();
     EtherfiCashCollateralListingsScript.Listing[] memory all = script.listings();
     for (uint256 i; i < all.length; i++) {
-      if (all[i].underlying != address(0)) active.push(all[i]);
+      if (all[i].underlying != address(0) && all[i].oracle != address(0)) active.push(all[i]);
     }
   }
 
