@@ -199,6 +199,27 @@ library AaveV4EtherfiCashAssets {
   address internal constant PAXGY_UNDERLYING = 0x5168E0cDeb3f308F47fDF0D9A2E250A2135C3cF5;
   address internal constant PAXGY_ORACLE = 0x9B92A2D4468ff3Df8A6Be50Ad043E8a5165459c2; // "PAXGy / USD"
   uint8 internal constant PAXGY_DECIMALS = 18;
+
+  // liquidDeFi ("Ether.Fi Liquid DeFi", Midas vault: higher-yield, higher-risk sibling of liquidUSD) —
+  // post-launch collateral-only listing through the timelock (scripts/etherfi/listings), request LIST-5.
+  // Underlying VERIFIED 2026-11-02 (symbol liquidDeFi, 18 decimals; Midas deposit vault
+  // 0x877f5D9fE35A0A2aFDD4539b992c0edD33d476f4 and redemption vault
+  // 0x1BCb96E1D4CBf07334f9bDdF2f1F872ED00D504b both report mToken() = this token and
+  // mTokenDataFeed() = 0xaD3cEB978AFa78d948B285a66ED85d87F4204B07).
+  // The Midas customFeed 0xF354e713E9DF3CfBEbAD1221D779F6C4ca198a57 ("liquidDeFi/USD") cannot be the source
+  // directly: it reverts on latestAnswer(), which AaveOracle.setReserveSource and every price read call.
+  // ORACLE is PREDICTED: the liquidRWA / liquidRESERVE stack, a CLRatePriceCapAdapter "Capped liquidDeFi / USD"
+  // (ONE USD base 0xa35e69267b208e7B175Fa0e34cEf0AA0Ff18d0F6, AccessManager as ACL manager, 7-day minimum
+  // snapshot delay, 12%/yr growth from a 1.00 snapshot at 2026-10-27 00:00 UTC) over a cash-v3
+  // ChainlinkPriceFeed "liquidDeFi / USD rate" (0x56CC4A6fBe4D0366fc106650aF8b86F87AA95De3: the customFeed,
+  // 8 decimals, 7-day bound, no stable snap). Both CREATE3 via the cash-v3 EtherFiDeployer
+  // (0xFCD957b5913d607BF2222280093421B1e2Af6f30), salts keccak256("LiquidDefiUsdFeed") /
+  // ("LiquidDefiUsdRateFeed"); cash-v3 scripts/liquid-defi/DeployLiquidDefiProdFeed asserts the deployment
+  // lands here and matches the live liquidRWA adapter field for field. The listing can be scheduled before
+  // the feed exists; executing needs it to price.
+  address internal constant LIQUID_DEFI_UNDERLYING = 0x4299b11815F25DB50fC56CD8a1C24cCCDD2AEECe;
+  address internal constant LIQUID_DEFI_ORACLE = 0x71CDe3FA526ac8CaF6659bCB236730F0c7e7dA4a; // "Capped liquidDeFi / USD"
+  uint8 internal constant LIQUID_DEFI_DECIMALS = 18;
 }
 
 /// @notice Launch spoke caps (whole tokens, uint40) — FINAL per the 'Submit to AAVE' section
@@ -237,6 +258,9 @@ library AaveV4EtherfiCashCaps {
   uint40 internal constant USDT0_DRAW_CAP = 0;
   // PAXGy — PROPOSED placeholder (iPAXG sits at 300); collateral-only, draw cap 0 by design
   uint40 internal constant PAXGY_ADD_CAP = 0;
+  // liquidDeFi — listed CLOSED (requested 1,000,000; the risk curator (201) raises it after launch);
+  // collateral-only, draw cap 0 by design
+  uint40 internal constant LIQUID_DEFI_ADD_CAP = 0;
 }
 
 /// @notice Collateral-side parameters of the reserves listed after launch (BPS), applied by the
@@ -264,6 +288,13 @@ library AaveV4EtherfiCashCollateral {
   // PAXGy — PROPOSED placeholder: mirrors the live iPAXG reserve (CF 80% / max bonus 10%).
   uint16 internal constant PAXGY_COLLATERAL_FACTOR = 75_00;
   uint32 internal constant PAXGY_MAX_LIQUIDATION_BONUS = 110_00;
+
+  // liquidDeFi — LIST-5, risk signed off 2026-11-01: LTV 64% / liquidation threshold 75% / bonus 7.5%.
+  // V4 has one collateral factor and liquidates at it, so CF = the liquidation threshold; the 64% LTV
+  // is enforced by the ether.fi app. Same mapping as the live liquidUSD reserve (app LTV 80% / LT 90%
+  // in the cash-v3 DebtManager, V4 CF 90% / max bonus 7.5%, read 2026-11-02).
+  uint16 internal constant LIQUID_DEFI_COLLATERAL_FACTOR = 75_00;
+  uint32 internal constant LIQUID_DEFI_MAX_LIQUIDATION_BONUS = 107_50;
 }
 
 /// @notice Debt-side parameters of the reserves made borrowable after launch (BPS). The launch
@@ -339,6 +370,9 @@ library AaveV4EtherfiCashTimelock {
   /// @dev PAXGy collateral-only listing (scripts/etherfi/listings)
   bytes32 internal constant OP_SALT_PAXGY_LISTING =
     keccak256('ETHERFI_CASH_TIMELOCK_OP_PAXGY_LISTING_V1');
+  /// @dev liquidDeFi collateral-only listing (scripts/etherfi/listings)
+  bytes32 internal constant OP_SALT_LIQUID_DEFI_LISTING =
+    keccak256('ETHERFI_CASH_TIMELOCK_OP_LIQUID_DEFI_LISTING_V1');
 }
 
 /// @notice AccessManager roles of the instance: Aave Roles.sol IDs, the launch payload's curator /
