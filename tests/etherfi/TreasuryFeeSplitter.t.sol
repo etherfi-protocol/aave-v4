@@ -27,8 +27,8 @@ contract TreasuryFeeSplitterTest is Base {
     assertEq(address(splitter.TREASURY_SPOKE()), address(treasurySpoke));
     assertTrue(splitter.isHubAllowed(address(hub1)));
     assertEq(splitter.owner(), SPLIT_OWNER);
-    assertEq(splitter.RECIPIENT_A(), RECIPIENT_A);
-    assertEq(splitter.RECIPIENT_B(), RECIPIENT_B);
+    assertEq(splitter.recipientA(), RECIPIENT_A);
+    assertEq(splitter.recipientB(), RECIPIENT_B);
     assertEq(splitter.SPLIT_PERCENTAGE_RECIPIENT_A(), SPLIT_A);
   }
 
@@ -96,6 +96,57 @@ contract TreasuryFeeSplitterTest is Base {
     vm.prank(newOwner);
     Ownable2Step(address(treasurySpoke)).acceptOwnership();
     assertEq(Ownable2Step(address(treasurySpoke)).owner(), newOwner);
+  }
+
+  // ---------------------------------------------------------------- recipients
+
+  function test_setRecipients() public {
+    address newA = makeAddr('NEW_A');
+    address newB = makeAddr('NEW_B');
+    vm.expectEmit(address(splitter));
+    emit TreasuryFeeSplitter.RecipientsUpdated(newA, newB);
+    vm.prank(SPLIT_OWNER);
+    splitter.setRecipients(newA, newB);
+    assertEq(splitter.recipientA(), newA);
+    assertEq(splitter.recipientB(), newB);
+
+    _supplyAsTreasury(hub1, tokenList.dai, 100e18);
+    splitter.splitRevenue(address(hub1), _tokens(address(tokenList.dai)));
+
+    assertEq(tokenList.dai.balanceOf(newA), 70e18, 'new A paid');
+    assertEq(tokenList.dai.balanceOf(newB), 30e18, 'new B paid');
+    assertEq(tokenList.dai.balanceOf(RECIPIENT_A), 0, 'old A not paid');
+    assertEq(tokenList.dai.balanceOf(RECIPIENT_B), 0, 'old B not paid');
+  }
+
+  function test_setRecipients_revertsWith_OwnableUnauthorizedAccount() public {
+    vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, ANYONE));
+    vm.prank(ANYONE);
+    splitter.setRecipients(ANYONE, RECIPIENT_B);
+  }
+
+  function test_setRecipients_revertsWith_InvalidAddress() public {
+    vm.startPrank(SPLIT_OWNER);
+    vm.expectRevert(TreasuryFeeSplitter.InvalidAddress.selector);
+    splitter.setRecipients(address(0), RECIPIENT_B);
+    vm.expectRevert(TreasuryFeeSplitter.InvalidAddress.selector);
+    splitter.setRecipients(RECIPIENT_A, address(0));
+    vm.stopPrank();
+  }
+
+  function test_setRecipients_revertsWith_SameRecipients() public {
+    vm.expectRevert(TreasuryFeeSplitter.SameRecipients.selector);
+    vm.prank(SPLIT_OWNER);
+    splitter.setRecipients(RECIPIENT_A, RECIPIENT_A);
+  }
+
+  // ---------------------------------------------------------------- ownership
+
+  function test_renounceOwnership_revertsWith_RenounceOwnershipDisabled() public {
+    vm.expectRevert(TreasuryFeeSplitter.RenounceOwnershipDisabled.selector);
+    vm.prank(SPLIT_OWNER);
+    splitter.renounceOwnership();
+    assertEq(splitter.owner(), SPLIT_OWNER);
   }
 
   // ---------------------------------------------------------------- hub allowlist
@@ -383,6 +434,48 @@ contract TreasuryFeeSplitterTest is Base {
     splitter.executeOnTreasury(abi.encodeCall(Ownable.transferOwnership, (ANYONE)));
   }
 
+  function test_executeOnTreasury_revertsWith_ForbiddenTreasuryCall_supply() public {
+    bytes memory data = abi.encodeCall(
+      ITreasurySpoke.supply,
+      (address(hub1), address(tokenList.dai), 1)
+    );
+    vm.expectRevert(
+      abi.encodeWithSelector(
+        TreasuryFeeSplitter.ForbiddenTreasuryCall.selector,
+        ITreasurySpoke.supply.selector
+      )
+    );
+    vm.prank(SPLIT_OWNER);
+    splitter.executeOnTreasury(data);
+  }
+
+  function test_executeOnTreasury_revertsWith_ForbiddenTreasuryCall_supplySkimmed() public {
+    bytes memory data = abi.encodeCall(
+      ITreasurySpoke.supplySkimmed,
+      (address(hub1), address(tokenList.dai), 1)
+    );
+    vm.expectRevert(
+      abi.encodeWithSelector(
+        TreasuryFeeSplitter.ForbiddenTreasuryCall.selector,
+        ITreasurySpoke.supplySkimmed.selector
+      )
+    );
+    vm.prank(SPLIT_OWNER);
+    splitter.executeOnTreasury(data);
+  }
+
+  function test_executeOnTreasury_revertsWith_ForbiddenTreasuryCall_renounceOwnership() public {
+    vm.expectRevert(
+      abi.encodeWithSelector(
+        TreasuryFeeSplitter.ForbiddenTreasuryCall.selector,
+        Ownable.renounceOwnership.selector
+      )
+    );
+    vm.prank(SPLIT_OWNER);
+    splitter.executeOnTreasury(abi.encodeCall(Ownable.renounceOwnership, ()));
+    assertEq(Ownable2Step(address(treasurySpoke)).owner(), address(splitter));
+  }
+
   function test_executeOnTreasury_bubblesRevert() public {
     vm.expectRevert(
       abi.encodeWithSelector(
@@ -462,13 +555,13 @@ contract TreasuryFeeSplitterTest is Base {
     HubActions.mintFeeShares({hub: hub1, assetId: daiAssetId, caller: ADMIN});
   }
 
-  /// @dev Treasury-held balance without waiting on accrual: supply skimmed on the treasury.
+  /// @dev Stands in for accrued fees without waiting on accrual: the splitter, as TreasurySpoke
+  ///      owner, supplies skimmed liquidity directly. `executeOnTreasury` rejects this call, so
+  ///      it never happens in production; it only grows the position the way fees do.
   function _supplyAsTreasury(IHub hub, IERC20 token, uint256 amount) internal {
     deal(address(token), address(hub), token.balanceOf(address(hub)) + amount);
-    vm.prank(SPLIT_OWNER);
-    splitter.executeOnTreasury(
-      abi.encodeCall(ITreasurySpoke.supplySkimmed, (address(hub), address(token), amount))
-    );
+    vm.prank(address(splitter));
+    treasurySpoke.supplySkimmed(address(hub), address(token), amount);
   }
 
   function _hubList(address a) internal pure returns (address[] memory h) {

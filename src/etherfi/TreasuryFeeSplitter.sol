@@ -12,10 +12,11 @@ import {ITreasurySpoke} from 'src/spoke/interfaces/ITreasurySpoke.sol';
 /// @title TreasuryFeeSplitter
 /// @author ether.fi
 /// @notice Owns the ether.fi Cash Aave V4 TreasurySpoke and splits its fees between two
-///         recipients fixed at deployment.
-/// @dev Follows the Aave V3 `RevenueSplitter` (aave-v3-origin, removed in b2e83fb3): two immutable
+///         recipients.
+/// @dev Follows the Aave V3 `RevenueSplitter` (aave-v3-origin, removed in b2e83fb3): two
 ///      recipients, an immutable split for recipient A with recipient B taking the remainder, and
-///      permissionless `splitRevenue` / `splitNativeRevenue()`.
+///      permissionless `splitRevenue` / `splitNativeRevenue()`. Unlike V3, the owner can replace
+///      the recipients, so a recipient the token blocks cannot stall splitting.
 ///
 ///      The difference is forced by V4: the TreasurySpoke is the Hub `feeReceiver` and holds fees
 ///      as Hub shares, and `TreasurySpoke.withdraw` pays out only to its owner. So instead of
@@ -29,8 +30,13 @@ import {ITreasurySpoke} from 'src/spoke/interfaces/ITreasurySpoke.sol';
 ///      Fees reach the TreasurySpoke only once `Hub.mintFeeShares` runs (HUB_FEE_MINTER_ROLE on
 ///      the Hub AccessManager). This contract does not mint.
 ///
-///      The owner (the Lend timelock) keeps every owner power over the TreasurySpoke through
-///      `executeOnTreasury`, including `transferOwnership` to hand it back.
+///      `splitRevenue` treats the TreasurySpoke's whole Hub position as fees, because the Hub
+///      does not separate fee shares from supplied shares. To keep that true, the owner (the
+///      Lend timelock) cannot `supply` or `supplySkimmed` through `executeOnTreasury`; capital
+///      to reinvest goes in after the TreasurySpoke is handed back. Every other owner power over
+///      the TreasurySpoke stays available through `executeOnTreasury`, including
+///      `transferOwnership` to hand it back, except `renounceOwnership`, which would strand the
+///      fees.
 contract TreasuryFeeSplitter is Ownable2Step, ReentrancyGuardTransient {
   using SafeERC20 for IERC20;
   using PercentageMath for uint256;
@@ -38,8 +44,8 @@ contract TreasuryFeeSplitter is Ownable2Step, ReentrancyGuardTransient {
   /// @notice The TreasurySpoke this contract owns and withdraws from.
   ITreasurySpoke public immutable TREASURY_SPOKE;
 
-  address payable public immutable RECIPIENT_A;
-  address payable public immutable RECIPIENT_B;
+  address payable public recipientA;
+  address payable public recipientB;
 
   /// @notice Recipient A's share in basis points; recipient B receives the remainder.
   uint16 public immutable SPLIT_PERCENTAGE_RECIPIENT_A;
@@ -48,6 +54,7 @@ contract TreasuryFeeSplitter is Ownable2Step, ReentrancyGuardTransient {
   mapping(address hub => bool) public isHubAllowed;
 
   event HubAllowedUpdated(address indexed hub, bool allowed);
+  event RecipientsUpdated(address indexed recipientA, address indexed recipientB);
   event RevenueSplit(address indexed hub, address indexed token, uint256 amountA, uint256 amountB);
   event NativeRevenueSplit(uint256 amountA, uint256 amountB, bool sentA, bool sentB);
   event TreasuryCallExecuted(bytes data, bytes result);
@@ -58,28 +65,27 @@ contract TreasuryFeeSplitter is Ownable2Step, ReentrancyGuardTransient {
   error SameRecipients();
   error HubNotAllowed(address hub);
   error NothingWithdrawn(address token);
+  error ForbiddenTreasuryCall(bytes4 selector);
+  error RenounceOwnershipDisabled();
 
   /// @param treasurySpoke The TreasurySpoke to own. Ownership is transferred separately
   ///        (two-step: the current owner calls `transferOwnership`, then this contract's owner
   ///        calls `executeOnTreasury(acceptOwnership())`).
   /// @param hubs The Hubs initially allowed for `splitRevenue`.
   /// @param initialOwner The owner of this contract (the Lend timelock).
-  /// @param recipientA Receives `splitPercentageRecipientA` of every split.
-  /// @param recipientB Receives the remainder of every split; must differ from `recipientA`.
+  /// @param initialRecipientA Receives `splitPercentageRecipientA` of every split.
+  /// @param initialRecipientB Receives the remainder of every split; must differ from A.
   /// @param splitPercentageRecipientA Recipient A's share in basis points, in (0, 10_000).
   constructor(
     address treasurySpoke,
     address[] memory hubs,
     address initialOwner,
-    address recipientA,
-    address recipientB,
+    address initialRecipientA,
+    address initialRecipientB,
     uint16 splitPercentageRecipientA
   ) Ownable(initialOwner) {
-    if (treasurySpoke == address(0) || recipientA == address(0) || recipientB == address(0)) {
+    if (treasurySpoke == address(0)) {
       revert InvalidAddress();
-    }
-    if (recipientA == recipientB) {
-      revert SameRecipients();
     }
     if (
       splitPercentageRecipientA == 0 ||
@@ -89,9 +95,8 @@ contract TreasuryFeeSplitter is Ownable2Step, ReentrancyGuardTransient {
     }
 
     TREASURY_SPOKE = ITreasurySpoke(treasurySpoke);
-    RECIPIENT_A = payable(recipientA);
-    RECIPIENT_B = payable(recipientB);
     SPLIT_PERCENTAGE_RECIPIENT_A = splitPercentageRecipientA;
+    _setRecipients(initialRecipientA, initialRecipientB);
     for (uint256 i; i < hubs.length; ++i) {
       _setHubAllowed(hubs[i], true);
     }
@@ -136,10 +141,10 @@ contract TreasuryFeeSplitter is Ownable2Step, ReentrancyGuardTransient {
 
       // skip zero shares: some ERC-20s revert on zero transfers, which would block the batch
       if (amountA > 0) {
-        token.safeTransfer(RECIPIENT_A, amountA);
+        token.safeTransfer(recipientA, amountA);
       }
       if (amountB > 0) {
-        token.safeTransfer(RECIPIENT_B, amountB);
+        token.safeTransfer(recipientB, amountB);
       }
       emit RevenueSplit(hub, address(token), amountA, amountB);
     }
@@ -158,8 +163,8 @@ contract TreasuryFeeSplitter is Ownable2Step, ReentrancyGuardTransient {
     uint256 amountA = balance.percentMulDown(SPLIT_PERCENTAGE_RECIPIENT_A);
     uint256 amountB = balance - amountA;
 
-    bool sentA = _sendNative(RECIPIENT_A, amountA);
-    bool sentB = _sendNative(RECIPIENT_B, amountB);
+    bool sentA = _sendNative(recipientA, amountA);
+    bool sentB = _sendNative(recipientB, amountB);
     emit NativeRevenueSplit(amountA, amountB, sentA, sentB);
   }
 
@@ -168,11 +173,30 @@ contract TreasuryFeeSplitter is Ownable2Step, ReentrancyGuardTransient {
     _setHubAllowed(hub, allowed);
   }
 
-  /// @notice Calls the TreasurySpoke as its owner, preserving every owner power over it.
+  /// @notice Replaces the recipients, for example when a token blocks one of them.
+  /// @dev The split percentage is unchanged: `newRecipientA` receives
+  ///      `SPLIT_PERCENTAGE_RECIPIENT_A`, `newRecipientB` the remainder.
+  function setRecipients(address newRecipientA, address newRecipientB) external onlyOwner {
+    _setRecipients(newRecipientA, newRecipientB);
+  }
+
+  /// @notice Calls the TreasurySpoke as its owner.
   /// @dev Used for `acceptOwnership` after the handover, `transferOwnership` to hand it back,
-  ///      and `supplySkimmed`, `transfer` or `withdraw` outside the split. A plain `withdraw`
-  ///      leaves the tokens here; `rescueToken` moves them on.
+  ///      and `transfer` or `withdraw` outside the split. A plain `withdraw` leaves the tokens
+  ///      here; `rescueToken` moves them on.
+  ///      Rejects `supply` and `supplySkimmed`, which would add capital that the next
+  ///      `splitRevenue` pays out as fees, and `renounceOwnership`, which would leave the
+  ///      TreasurySpoke with no owner to withdraw its fees.
   function executeOnTreasury(bytes calldata data) external onlyOwner returns (bytes memory result) {
+    bytes4 selector = bytes4(data);
+    if (
+      selector == ITreasurySpoke.supply.selector ||
+      selector == ITreasurySpoke.supplySkimmed.selector ||
+      selector == Ownable.renounceOwnership.selector
+    ) {
+      revert ForbiddenTreasuryCall(selector);
+    }
+
     bool success;
     (success, result) = address(TREASURY_SPOKE).call(data);
     if (!success) {
@@ -191,12 +215,30 @@ contract TreasuryFeeSplitter is Ownable2Step, ReentrancyGuardTransient {
     emit TokenRescued(token, to, amount);
   }
 
+  /// @notice Disabled: without an owner, nobody could hand the TreasurySpoke back or change
+  ///         the recipients or allowed Hubs.
+  function renounceOwnership() public pure override {
+    revert RenounceOwnershipDisabled();
+  }
+
   receive() external payable {}
 
   function _setHubAllowed(address hub, bool allowed) internal {
     if (hub == address(0)) revert InvalidAddress();
     isHubAllowed[hub] = allowed;
     emit HubAllowedUpdated(hub, allowed);
+  }
+
+  function _setRecipients(address newRecipientA, address newRecipientB) internal {
+    if (newRecipientA == address(0) || newRecipientB == address(0)) {
+      revert InvalidAddress();
+    }
+    if (newRecipientA == newRecipientB) {
+      revert SameRecipients();
+    }
+    recipientA = payable(newRecipientA);
+    recipientB = payable(newRecipientB);
+    emit RecipientsUpdated(newRecipientA, newRecipientB);
   }
 
   /// @dev Failures do not revert, matching the Aave V3 RevenueSplitter; the caller records them.
